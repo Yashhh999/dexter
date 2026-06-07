@@ -357,18 +357,19 @@ class GPT(nn.Module):
         if cfg.use_8bit_adam and device_type == "cuda":
             try:
                 import bitsandbytes as bnb
-                # PagedAdamW8bit keeps Adam's m/v state in CPU RAM and pages it onto the GPU
-                # only for the moment of the update -- so it uses ~0 GPU memory for optimizer
-                # state.  Under nn.DataParallel (which pins the whole model + fp32 grads on
-                # GPU 0), this is what lets the 1.6B model fit on a single 16 GB T4.
-                try:
+                if getattr(cfg, "use_paged_adam", False):
+                    # PAGED: optimizer state lives in CPU RAM and is paged onto the GPU only
+                    # for each update -> lowest GPU memory, but SLOW (PCIe transfer every step).
+                    # Only worth it if plain 8-bit AdamW still OOMs.
                     opt = bnb.optim.PagedAdamW8bit(groups, lr=cfg.lr,
                                                    betas=(cfg.beta1, cfg.beta2))
-                    print("[optim] using bitsandbytes PagedAdamW8bit (optimizer state paged to CPU).")
-                except AttributeError:
-                    # Older bitsandbytes without the Paged variant -> plain 8-bit AdamW.
+                    print("[optim] using bitsandbytes PagedAdamW8bit (state paged to CPU; slower).")
+                else:
+                    # NON-PAGED: 8-bit optimizer state stays on the GPU (1 byte per moment).
+                    # ~4x less optimizer memory than fp32 AdamW, and MUCH faster than paging.
+                    # This fits comfortably now that the model is ~0.9B.
                     opt = bnb.optim.AdamW8bit(groups, lr=cfg.lr, betas=(cfg.beta1, cfg.beta2))
-                    print("[optim] using bitsandbytes 8-bit AdamW (low optimizer memory).")
+                    print("[optim] using bitsandbytes 8-bit AdamW (state on GPU; fast).")
                 return opt
             except Exception as e:  # bitsandbytes missing or no GPU support -> fall back.
                 print(f"[optim] 8-bit AdamW unavailable ({e}); falling back to torch AdamW.")

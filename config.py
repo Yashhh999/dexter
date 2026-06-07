@@ -115,6 +115,12 @@ class Config:
                                     #   8-bit AdamW.  This stores Adam's two state tensors in
                                     #   1 byte each instead of 4, cutting optimizer memory ~4x
                                     #   -- a trick that helps the model fit on a 14.5 GB T4.
+                                    #   State stays ON the GPU -> fast.
+
+    use_paged_adam: bool = False    # if True, use the *Paged* 8-bit AdamW, which offloads
+                                    #   optimizer state to CPU RAM and pages it over PCIe every
+                                    #   step.  Saves more GPU memory but is MUCH SLOWER.  Only
+                                    #   enable if plain 8-bit AdamW still OOMs.
 
     use_grad_checkpoint: bool = False  # if True, don't keep activations for the backward
                                     #   pass; recompute them instead.  Trades ~30% extra
