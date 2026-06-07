@@ -357,8 +357,18 @@ class GPT(nn.Module):
         if cfg.use_8bit_adam and device_type == "cuda":
             try:
                 import bitsandbytes as bnb
-                opt = bnb.optim.AdamW8bit(groups, lr=cfg.lr, betas=(cfg.beta1, cfg.beta2))
-                print("[optim] using bitsandbytes 8-bit AdamW (low optimizer memory).")
+                # PagedAdamW8bit keeps Adam's m/v state in CPU RAM and pages it onto the GPU
+                # only for the moment of the update -- so it uses ~0 GPU memory for optimizer
+                # state.  Under nn.DataParallel (which pins the whole model + fp32 grads on
+                # GPU 0), this is what lets the 1.6B model fit on a single 16 GB T4.
+                try:
+                    opt = bnb.optim.PagedAdamW8bit(groups, lr=cfg.lr,
+                                                   betas=(cfg.beta1, cfg.beta2))
+                    print("[optim] using bitsandbytes PagedAdamW8bit (optimizer state paged to CPU).")
+                except AttributeError:
+                    # Older bitsandbytes without the Paged variant -> plain 8-bit AdamW.
+                    opt = bnb.optim.AdamW8bit(groups, lr=cfg.lr, betas=(cfg.beta1, cfg.beta2))
+                    print("[optim] using bitsandbytes 8-bit AdamW (low optimizer memory).")
                 return opt
             except Exception as e:  # bitsandbytes missing or no GPU support -> fall back.
                 print(f"[optim] 8-bit AdamW unavailable ({e}); falling back to torch AdamW.")

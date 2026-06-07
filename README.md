@@ -62,20 +62,29 @@ synthetic story corpus so it runs with no network at all.
 
 ## The real run (Kaggle — the `full` preset, ~1.6B params)
 
-On a Kaggle notebook with **GPU T4 ×2** selected:
+On a Kaggle notebook with **GPU T4 ×2** selected and **Internet → On**:
 
 ```python
-# 1) deps
+# 0) get the code (the project files are at the repo ROOT). %cd is a notebook magic that
+#    persists across cells; plain `!cd` would NOT.
+!git clone https://github.com/Yashhh999/dexter.git
+%cd dexter
+
+# 1) deps (torch + numpy are already in Kaggle's image)
 !pip install -q datasets tokenizers bitsandbytes
 
 # 2) train. The tokenizer trains once, data is tokenized once to .bin, then it trains.
 #    Kaggle sessions time out — just re-run this cell and it AUTO-RESUMES from the latest
-#    checkpoint in ./checkpoints.
-!cd my_llm && python train.py --preset full
+#    checkpoint in ./checkpoints.  Add e.g. `--max_steps 8000` for a session-sized run.
+!python train.py --preset full
 
 # 3) watch it write
-!cd my_llm && python sample.py --preset full --prompt "Once upon a time" --num_samples 3
+!python sample.py --preset full --prompt "Once upon a time" --num_samples 3
 ```
+
+> The `full` preset uses **PagedAdamW8bit** + gradient checkpointing + `batch_size=2` so the
+> ~1.6B model fits a single 16 GB T4 even though `nn.DataParallel` pins the whole model and
+> its fp32 gradients on GPU 0.
 
 You'll see a log line every 100 steps and a generated paragraph every 500 steps:
 

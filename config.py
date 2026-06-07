@@ -204,9 +204,12 @@ def get_config(preset: str = "tiny", **overrides) -> Config:
             dropout=0.0,
 
             # ---- batching: small micro-batch, big effective batch via accumulation ----
-            batch_size=4,           # per-GPU micro-batch.  Tune down to 2 if you hit OOM.
-            grad_accum_steps=8,     # -> effective batch = 4 * 8 * 2 GPUs = 64 sequences
-                                    #    = 64 * 1024 = 65,536 tokens per optimizer step.
+            batch_size=2,           # per-GPU micro-batch.  Kept at 2 so that params + fp32
+                                    #   grads + activations fit a single 16 GB T4 (remember
+                                    #   DataParallel pins the whole model on GPU 0).  Raise to
+                                    #   4 only if you see spare VRAM in `nvidia-smi`.
+            grad_accum_steps=8,     # -> effective batch = 2 * 8 * 2 GPUs = 32 sequences
+                                    #    = 32 * 1024 = 32,768 tokens per optimizer step.
 
             # ---- optimizer / schedule (the spec: AdamW, lr 3e-4, cosine decay) ----
             lr=3e-4,
