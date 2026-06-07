@@ -17,7 +17,7 @@ of two presets:
   * "tiny"  -> a microscopic model that trains on a CPU/laptop in seconds.
               Use this to LEARN and to smoke-test that the whole pipeline works.
 
-  * "full"  -> the real ~1.6B-parameter model meant for Kaggle's 2x T4 GPUs.
+  * "full"  -> the real ~0.9B-parameter model meant for Kaggle's 2x T4 GPUs.
 
 Why a dataclass instead of a dict?  A dataclass gives you autocompletion, type
 hints, and a clear list of every knob in one screen.  It is also trivially
@@ -114,7 +114,7 @@ class Config:
     use_8bit_adam: bool = False     # if True (and CUDA + bitsandbytes are available) use an
                                     #   8-bit AdamW.  This stores Adam's two state tensors in
                                     #   1 byte each instead of 4, cutting optimizer memory ~4x
-                                    #   -- the trick that lets the 1.6B model fit on a T4.
+                                    #   -- a trick that helps the model fit on a 14.5 GB T4.
 
     use_grad_checkpoint: bool = False  # if True, don't keep activations for the backward
                                     #   pass; recompute them instead.  Trades ~30% extra
@@ -183,7 +183,7 @@ def get_config(preset: str = "tiny", **overrides) -> Config:
 
     Two presets:
       "tiny" -> learn / smoke-test locally (CPU friendly).
-      "full" -> the real ~1.6B model for Kaggle 2x T4.
+      "full" -> the real ~0.9B model for Kaggle 2x T4.
     """
     preset = preset.lower()
 
@@ -194,13 +194,20 @@ def get_config(preset: str = "tiny", **overrides) -> Config:
     elif preset == "full":
         cfg = Config(
             preset_name="full",
-            # ---- architecture: the spec's "1B" config (actually ~1.6B, see README) ----
+            # ---- architecture: a ~0.9B model sized to actually FIT 2x T4 under DataParallel.
+            #   WHY not the original 2048-wide / 8192-FFN (=1.63B) spec?  DataParallel keeps
+            #   the whole model on GPU 0 AND gathers every gradient there, so GPU 0 needs
+            #   ~params + ~grads = (6.5 + 6.5) = ~13 GB for 1.63B -- which overflows a 14.56 GB
+            #   T4 *during backward*, before the optimizer is even touched.  Narrowing the
+            #   width to 1536 (and FFN to 6144) drops this to ~3.7 + 3.7 = ~7.4 GB, leaving
+            #   room for activations + the 8-bit optimizer.  Depth (24 layers) and context
+            #   (1024) are unchanged, so it's still a deep, real billion-class model.
             vocab_size=8000,        # matches the BPE tokenizer we train for Kaggle.
-            n_layer=24,             # 24 transformer blocks deep.
-            n_head=16,              # 16 attention heads (2048 / 16 = 128 dims per head).
-            n_embd=2048,            # model width.
-            ffn_hidden=8192,        # SwiGLU inner dim (== the spec's "FFN dim 8192").
-            block_size=1024,        # 1024-token context window.
+            n_layer=24,             # 24 transformer blocks deep (unchanged).
+            n_head=12,              # 12 attention heads (1536 / 12 = 128 dims per head).
+            n_embd=1536,            # model width (narrowed from 2048 to fit GPU 0).
+            ffn_hidden=6144,        # SwiGLU inner dim (4 x n_embd).
+            block_size=1024,        # 1024-token context window (unchanged).
             dropout=0.0,
 
             # ---- batching: small micro-batch, big effective batch via accumulation ----
@@ -221,9 +228,9 @@ def get_config(preset: str = "tiny", **overrides) -> Config:
             beta2=0.95,
             grad_clip=1.0,
 
-            # ---- precision / memory: the tricks that make 1.6B fit on 2x T4 ----
+            # ---- precision / memory: the tricks that make ~0.9B fit on 2x T4 ----
             amp_dtype="float16",        # T4 = fast fp16, no bf16.
-            use_8bit_adam=True,         # 8-bit AdamW -> optimizer state ~6.5 GB not ~26 GB.
+            use_8bit_adam=True,         # 8-bit/Paged AdamW -> optimizer state ~1.8 GB not ~7.4 GB.
             use_grad_checkpoint=True,   # recompute activations -> big activation-memory save.
 
             # ---- intervals (the spec's cadence) ----

@@ -3,7 +3,7 @@
 A complete, **heavily commented** decoder-only GPT you can read end-to-end to learn how a
 modern language model actually works — and then train on
 [TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories), either on your laptop
-(`tiny` preset) or on **Kaggle's 2× T4 GPUs** (`full` preset, ~1.6B parameters).
+(`tiny` preset) or on **Kaggle's 2× T4 GPUs** (`full` preset, ~0.9B parameters).
 
 It uses the same ingredients as Llama-style models:
 
@@ -60,7 +60,7 @@ synthetic story corpus so it runs with no network at all.
 
 ---
 
-## The real run (Kaggle — the `full` preset, ~1.6B params)
+## The real run (Kaggle — the `full` preset, ~0.9B params)
 
 On a Kaggle notebook with **GPU T4 ×2** selected and **Internet → On**:
 
@@ -83,7 +83,7 @@ On a Kaggle notebook with **GPU T4 ×2** selected and **Internet → On**:
 ```
 
 > The `full` preset uses **PagedAdamW8bit** + gradient checkpointing + `batch_size=2` so the
-> ~1.6B model fits a single 16 GB T4 even though `nn.DataParallel` pins the whole model and
+> ~0.9B model fits a single 16 GB T4 even though `nn.DataParallel` pins the whole model and
 > its fp32 gradients on GPU 0.
 
 You'll see a log line every 100 steps and a generated paragraph every 500 steps:
@@ -96,40 +96,45 @@ You'll see a log line every 100 steps and a generated paragraph every 500 steps:
 
 ---
 
-## Why this config needs 8-bit Adam + gradient checkpointing (the memory math)
+## Why the `full` preset is ~0.9B (and why DataParallel forces that)
 
-The spec's config — 24 layers, dim 2048, FFN 8192, SwiGLU, vocab 8000 — is actually
-**~1.63 billion parameters**, not 1B (run `python config.py` to see both presets' sizes).
-SwiGLU's *three* FFN matrices (`3 × 2048 × 8192` per layer) dominate the count.
+The original spec — 24 layers, dim **2048**, FFN **8192**, SwiGLU — is actually
+**~1.63 billion parameters** (SwiGLU's *three* `2048 × 8192` FFN matrices dominate). It does
+**not fit** 2× T4 under `nn.DataParallel`, and the reason is subtle but important:
 
-Now the catch: this project uses **`nn.DataParallel`** (the requested multi-GPU method).
-DataParallel **replicates** the model and keeps **all optimizer state on GPU 0** — it does
-**not** shard like FSDP/ZeRO. With a plain fp32 AdamW that means GPU 0 must hold:
+DataParallel keeps the **whole model on GPU 0** *and* **gathers every gradient back to GPU 0**
+(it does **not** shard like FSDP/ZeRO). During `backward()`, GPU 0 therefore holds:
 
 ```
 params (fp32)      1.63B × 4 B  ≈  6.5 GB
-grads  (fp32)      1.63B × 4 B  ≈  6.5 GB
-Adam m (fp32)      1.63B × 4 B  ≈  6.5 GB
-Adam v (fp32)      1.63B × 4 B  ≈  6.5 GB
-                               ≈ 26 GB  ✗  (a T4 has only 16 GB)
+grads  (fp32)      1.63B × 4 B  ≈  6.5 GB   ← gathered from BOTH GPUs onto GPU 0
+                               ≈ 13 GB + activations + comm buffers
+                               ≈ 14.3 GB  ✗  (a Kaggle T4 exposes only 14.56 GB)
 ```
 
-So the exact config **cannot** train this way out of the box. The two fixes, both **on by
-default in the `full` preset**:
+This overflows **before the optimizer is even used** — so no optimizer trick (8-bit, paging)
+can save it. The only real fixes are to shard (FSDP, which isn't DataParallel) or to make the
+model smaller. So the `full` preset narrows the width to **dim 1536 / FFN 6144** → **~0.92B
+params**, which drops GPU 0's params+grads to ~3.7 + 3.7 = **~7.4 GB**. Depth (24 layers) and
+context (1024) are unchanged — it's still a deep, real billion-class model.
 
-* **8-bit AdamW** (`bitsandbytes`): stores Adam's `m` and `v` in **1 byte** each instead of 4,
-  dropping optimizer state from ~13 GB to ~3.3 GB → total **~14 GB**, which fits.
-* **Gradient checkpointing**: don't keep block activations for backprop, **recompute** them
-  instead. Costs ~30% extra compute but slashes activation memory (the other thing that grows
-  with batch × context).
+On top of that, two memory savers keep it comfortable (both **on by default**):
 
-If you still hit OOM, lower `batch_size` to `2` in the `full` preset (effective batch is kept
+* **8-bit / Paged AdamW** (`bitsandbytes`): stores Adam's `m`/`v` in 1 byte each (or pages them
+  to CPU), so optimizer state is ~2 GB (or ~0) on GPU instead of ~7 GB of fp32 AdamW state.
+  **You must `pip install bitsandbytes`** — without it the code falls back to fp32 AdamW, whose
+  ~7 GB of optimizer state will push you back into OOM.
+* **Gradient checkpointing**: recompute block activations in backward instead of storing them.
+  ~30% extra compute, big activation-memory saving.
+
+If you still hit OOM, drop `batch_size` to `1` in the `full` preset (effective batch is kept
 large by `grad_accum_steps`).
 
-> **Reality check:** TinyStories is *tiny*, so a 1.6B model is enormous overkill for the data —
-> this preset exists to give you the real "train a billion-param model on 2× T4" experience and
-> to prove the engineering works. For the best *stories-per-hour*, a few hundred-M model would
-> be plenty; tweak the `full` preset in [config.py](config.py) freely.
+> **Reality check:** TinyStories is *tiny*, so even ~0.9B is enormous overkill for the data —
+> this preset exists to give you the real "train a billion-class model on 2× T4" experience.
+> For the best *stories-per-hour*, a few-hundred-M model would be plenty; tweak the `full`
+> preset in [config.py](config.py) freely. To run the original 1.63B numbers you'd need a
+> sharding strategy (FSDP) rather than DataParallel, or a single GPU with ≥40 GB.
 
 ---
 
