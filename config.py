@@ -253,7 +253,9 @@ def get_config(preset: str = "tiny", **overrides) -> Config:
             sample_interval=500,
             eval_interval=1000,
             eval_iters=50,
-            ckpt_interval=1000,
+            ckpt_interval=100,      # save often (~every few min) so a Kaggle session that dies
+                                    #   costs at most ~100 steps.  Rotation keeps only the
+                                    #   newest 2, so disk stays bounded (~10 GB) despite this.
 
             # ---- data: use the WHOLE corpus on Kaggle (caps off) ----
             max_train_tokens=None,

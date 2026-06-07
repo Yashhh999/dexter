@@ -127,6 +127,8 @@ def main():
     parser.add_argument("--batch_size", type=int, default=None, help="override per-GPU micro-batch")
     parser.add_argument("--log_interval", type=int, default=None,
                         help="print a train log every N steps (lower = faster feedback)")
+    parser.add_argument("--ckpt_interval", type=int, default=None,
+                        help="save a checkpoint every N steps (lower = lose less on a crash)")
     parser.add_argument("--offline", action="store_true", help="use the synthetic corpus (no internet)")
     parser.add_argument("--no_resume", action="store_true", help="ignore existing checkpoints")
     parser.add_argument("--device", default=None, help="cuda | cpu (auto if unset)")
@@ -140,6 +142,8 @@ def main():
         overrides["batch_size"] = args.batch_size
     if args.log_interval is not None:
         overrides["log_interval"] = args.log_interval
+    if args.ckpt_interval is not None:
+        overrides["ckpt_interval"] = args.ckpt_interval
     if args.offline:
         overrides["offline"] = True
     cfg = get_config(args.preset, **overrides)
