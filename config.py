@@ -240,7 +240,12 @@ def get_config(preset: str = "tiny", **overrides) -> Config:
 
             # ---- precision / memory: the tricks that make ~0.9B fit on 2x T4 ----
             amp_dtype="float16",        # T4 = fast fp16, no bf16.
-            use_8bit_adam=True,         # 8-bit/Paged AdamW -> optimizer state ~1.8 GB not ~7.4 GB.
+            use_8bit_adam=True,         # 8-bit AdamW -> optimizer state ~1.8 GB not ~7.4 GB.
+            use_paged_adam=True,        # MUST page on 2x T4: DataParallel gathers all grads to
+                                        #   GPU 0 (a ~3.7 GB reduce buffer on top of params+grads),
+                                        #   so keeping the 1.8 GB optimizer state on-GPU tips it
+                                        #   over 14.56 GB.  Paging it to CPU is what fits.  (A bit
+                                        #   slower, but it's the only way under DataParallel.)
             use_grad_checkpoint=True,   # recompute activations -> big activation-memory save.
 
             # ---- intervals (the spec's cadence) ----
