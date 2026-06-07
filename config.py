@@ -126,6 +126,10 @@ class Config:
     eval_interval: int = 100        # estimate validation loss this often.
     eval_iters: int = 20            # number of batches to average for each val-loss estimate.
     ckpt_interval: int = 100        # write a checkpoint this often.
+    keep_last_checkpoints: int = 2  # disk saver: after each save, keep only the newest N
+                                    #   checkpoints and delete older ones.  Each checkpoint is
+                                    #   several GB for the full model, so without this a long
+                                    #   run fills the disk.  Set to 0 to keep ALL checkpoints.
 
     # =====================================================================================
     # 3) DATA / TOKENIZER

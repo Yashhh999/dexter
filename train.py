@@ -77,6 +77,28 @@ def save_checkpoint(path, raw_model, optimizer, scaler, step, cfg):
     }, path)
 
 
+def prune_checkpoints(ckpt_dir: str, keep: int):
+    """Keep only the `keep` most recent checkpoints; delete the rest.
+
+    Each checkpoint is several GB (full-model weights + optimizer state), so on a long run
+    they'd pile up and fill the disk.  keep<=0 disables pruning (keeps everything).
+    """
+    if keep <= 0:
+        return
+    paths = glob.glob(os.path.join(ckpt_dir, "ckpt_*.pt"))
+
+    def step_of(p):
+        return int(os.path.basename(p).split("_")[1].split(".")[0])
+
+    paths = sorted(paths, key=step_of)          # oldest -> newest
+    for old in paths[:-keep]:                    # everything except the newest `keep`
+        try:
+            os.remove(old)
+            print(f"[ckpt ] pruned old {os.path.basename(old)}")
+        except OSError:
+            pass
+
+
 # =========================================================================================
 # Validation-loss estimate (no gradients, averaged over several batches)
 # =========================================================================================
@@ -241,10 +263,12 @@ def main():
             path = os.path.join(cfg.ckpt_dir, f"ckpt_{step:06d}.pt")
             save_checkpoint(path, raw_model, optimizer, scaler, step, cfg)
             print(f"[ckpt ] saved {path}")
+            prune_checkpoints(cfg.ckpt_dir, cfg.keep_last_checkpoints)
 
     # Always save a final checkpoint at the end of the run.
     final = os.path.join(cfg.ckpt_dir, f"ckpt_{cfg.max_steps:06d}.pt")
     save_checkpoint(final, raw_model, optimizer, scaler, cfg.max_steps - 1, cfg)
+    prune_checkpoints(cfg.ckpt_dir, cfg.keep_last_checkpoints)
     print(f"[done ] training complete; final checkpoint {final}")
 
 
