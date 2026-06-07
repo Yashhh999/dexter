@@ -125,6 +125,8 @@ def main():
     parser.add_argument("--preset", default="tiny", choices=["tiny", "full"])
     parser.add_argument("--max_steps", type=int, default=None, help="override cfg.max_steps")
     parser.add_argument("--batch_size", type=int, default=None, help="override per-GPU micro-batch")
+    parser.add_argument("--log_interval", type=int, default=None,
+                        help="print a train log every N steps (lower = faster feedback)")
     parser.add_argument("--offline", action="store_true", help="use the synthetic corpus (no internet)")
     parser.add_argument("--no_resume", action="store_true", help="ignore existing checkpoints")
     parser.add_argument("--device", default=None, help="cuda | cpu (auto if unset)")
@@ -136,6 +138,8 @@ def main():
         overrides["max_steps"] = args.max_steps
     if args.batch_size is not None:
         overrides["batch_size"] = args.batch_size
+    if args.log_interval is not None:
+        overrides["log_interval"] = args.log_interval
     if args.offline:
         overrides["offline"] = True
     cfg = get_config(args.preset, **overrides)
