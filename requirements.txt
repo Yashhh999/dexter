@@ -1,0 +1,17 @@
+# Core deep-learning framework. 2.0+ is required for torch.nn.functional.
+# scaled_dot_product_attention (the fused "flash"/memory-efficient attention kernel).
+torch>=2.0
+
+# Fast array ops + the uint16 memmap that backs our pre-tokenized .bin files.
+numpy
+
+# HuggingFace datasets, used in STREAMING mode to pull TinyStories without filling disk.
+datasets
+
+# HuggingFace tokenizers (Rust-backed) -- trains our byte-level BPE vocabulary.
+tokenizers
+
+# 8-bit AdamW optimizer. Only needed for the "full" (1.6B) preset on a CUDA GPU; it cuts
+# optimizer memory ~4x so the model fits on a 16 GB T4. Safe to skip for local CPU runs
+# (the code automatically falls back to torch.optim.AdamW when bitsandbytes is unavailable).
+bitsandbytes ; platform_system == "Linux"
