@@ -135,15 +135,25 @@ clean, reasoning-dense corpus, then train your small Dexter *student* on it. Thi
 token-for-token. The student won't match the teacher, but it learns far more per token.
 
 ```bash
-# 1) generate the corpus (resumable, rate-limit aware; runs over days on a free tier)
-export GROQ_API_KEY=...                 # or OPENROUTER_API_KEY + --provider openrouter
-python distill_generate.py --provider groq --model openai/gpt-oss-120b --target_docs 5000
-#    test the loop with no key:  python distill_generate.py --dry_run --target_docs 20
+# 1) generate the corpus on your LAPTOP in the background (no GPU needed), while the GPUs
+#    train. It ROTATES across several free models -> more throughput + dodges rate limits
+#    (on a 429 it cools that model down and switches). Resumable; Ctrl-C safe.
+export GROQ_API_KEY=...                  # and/or OPENROUTER_API_KEY=... for openrouter: models
+nohup python distill_generate.py --target_docs 20000 \
+    --models groq:openai/gpt-oss-120b,groq:openai/gpt-oss-20b,groq:qwen/qwen3-32b,groq:llama-3.1-8b-instant \
+    > distill.log 2>&1 &
+tail -f distill.log                      # watch it; re-run the same line any time to resume
+#   test with no key/network:  python distill_generate.py --dry_run --target_docs 20
 
 # 2) train Dexter on it (blended with web data for volume). Same DDP / platform flags:
 torchrun --standalone --nproc_per_node=2 train.py --preset distill --kaggle   # Kaggle
 python train.py --preset distill --colab                                       # Colab
 ```
+
+> **Runs in parallel with training.** Generation is CPU + network only, so run it on your own
+> machine (or a second notebook) 24/7 while Kaggle/Colab GPUs train. Because training tokenizes
+> the corpus once into `.bin`, the loop is: *generate more → re-tokenize → keep training* (delete
+> `data_distill/train.bin` to re-tokenize with the newly grown corpus).
 
 The `distill` preset's data mix leads with `data_distill/corpus.jsonl` (your generated data),
 blended with Cosmopedia/FineWeb-Edu. It keeps its own tokenizer/data/checkpoints and Hub
@@ -251,3 +261,7 @@ Run cmd :-
 !torchrun --standalone --nproc_per_node=2 train.py --preset base2 --kaggle
 # Colab (1 GPU):
 !python train.py --preset base2 --colab
+
+
+python distill_generate.py --provider groq --model openai/gpt-oss-120b --target_docs 5000
+torchrun --standalone --nproc_per_node=2 train.py --preset distill --kaggle   # or --colab

@@ -17,11 +17,20 @@ model card (see the licensing note at the bottom).
 
 ------------------------------------------------------------------------------------------
 USAGE
-  export GROQ_API_KEY=...                       # or OPENROUTER_API_KEY for --provider openrouter
-  python distill_generate.py --provider groq --model openai/gpt-oss-120b --target_docs 2000
+  export GROQ_API_KEY=...            # and/or OPENROUTER_API_KEY=... for openrouter: models
 
-  # resumes automatically (appends to the same .jsonl); rate-limit aware; Ctrl-C safe.
-  # test the whole loop without an API key / network:
+  # ROTATE across several free models -> multiplies free throughput and dodges per-model
+  # rate limits (on a 429 it cools that model down and switches to the next one):
+  python distill_generate.py --target_docs 20000 \
+      --models groq:openai/gpt-oss-120b,groq:openai/gpt-oss-20b,groq:qwen/qwen3-32b,\
+groq:llama-3.1-8b-instant,openrouter:meta-llama/llama-3.1-8b-instruct:free
+
+  # run it in the BACKGROUND on your laptop (NO GPU needed) while Kaggle/Colab trains:
+  nohup python distill_generate.py --models groq:openai/gpt-oss-120b,groq:openai/gpt-oss-20b \
+      --target_docs 20000 > distill.log 2>&1 &
+  tail -f distill.log                # watch it; it resumes if you stop/restart (appends)
+
+  # test the whole loop with no key / no network:
   python distill_generate.py --dry_run --target_docs 20
 ------------------------------------------------------------------------------------------
 """
@@ -114,31 +123,73 @@ def build_messages(recipe_name: str):
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
-def call_teacher(url, model, key, messages, max_tokens, timeout=120):
-    """One chat completion with retry/backoff on rate-limit (429) and transient 5xx errors.
-    Returns the generated text, or None if it keeps failing."""
-    import requests  # imported here so --dry_run works with no extra deps installed
-    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-    payload = {"model": model, "messages": messages, "temperature": 0.9,
+def parse_endpoints(models_arg: str, default_provider: str):
+    """
+    Turn a comma list of '[provider:]model' into endpoint dicts.  We split on the FIRST colon
+    so model ids that themselves contain ':' (e.g. OpenRouter's 'name:free') survive.  An entry
+    with no recognized provider prefix uses --provider.
+    """
+    endpoints = []
+    for item in models_arg.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if ":" in item and item.split(":", 1)[0] in PROVIDERS:
+            provider, model = item.split(":", 1)
+        else:
+            provider, model = default_provider, item
+        url, key_env = PROVIDERS[provider]
+        endpoints.append({"provider": provider, "model": model, "url": url,
+                          "key_env": key_env, "key": os.environ.get(key_env),
+                          "cooldown_until": 0.0})
+    return endpoints
+
+
+def call_one(ep, messages, max_tokens, timeout=120):
+    """
+    One chat completion against a single endpoint.  Returns (text, cooldown_seconds):
+      * text None + cooldown>0  -> this model is rate-limited/busy: sleep it that long, rotate.
+      * text str  + cooldown 0  -> success.
+    Our requests are tiny (≈200-token prompt, ≤max_tokens response) -- far under every model's
+    limits -- so the ONLY expected failure is a 429 rate limit, which we handle by rotating.
+    """
+    import requests  # imported here so --dry_run needs no deps
+    headers = {"Authorization": f"Bearer {ep['key']}", "Content-Type": "application/json"}
+    payload = {"model": ep["model"], "messages": messages, "temperature": 0.9,
                "top_p": 0.95, "max_tokens": max_tokens}
-    for attempt in range(6):
+    try:
+        r = requests.post(ep["url"], headers=headers, json=payload, timeout=timeout)
+    except requests.RequestException as e:
+        print(f"[gen] {ep['model']}: network error ({e})", flush=True)
+        return None, 15
+    if r.status_code == 200:
         try:
-            r = requests.post(url, headers=headers, json=payload, timeout=timeout)
-        except requests.RequestException as e:
-            wait = min(60, 2 ** attempt)
-            print(f"[gen] network error ({e}); retry in {wait}s")
-            time.sleep(wait)
-            continue
-        if r.status_code == 200:
-            return r.json()["choices"][0]["message"]["content"].strip()
-        if r.status_code in (429, 500, 502, 503, 529):
-            # Respect the server's Retry-After if it sent one, else exponential backoff.
-            wait = int(r.headers.get("retry-after", min(60, 2 ** attempt)))
-            print(f"[gen] HTTP {r.status_code} (rate limit / busy); backing off {wait}s")
-            time.sleep(wait)
-            continue
-        raise RuntimeError(f"API error {r.status_code}: {r.text[:300]}")
-    return None
+            return r.json()["choices"][0]["message"]["content"].strip(), 0
+        except (KeyError, IndexError, ValueError):
+            return None, 5
+    if r.status_code in (429, 500, 502, 503, 529):   # rate-limited / busy -> cool down + rotate
+        cooldown = int(r.headers.get("retry-after", 60))
+        print(f"[gen] {ep['model']}: HTTP {r.status_code} -> cooldown {cooldown}s, rotating", flush=True)
+        return None, cooldown
+    # 400/401/404/... -> a real problem with this endpoint; cool it for an hour so we stop hammering.
+    print(f"[gen] {ep['model']}: HTTP {r.status_code}: {r.text[:160]}", flush=True)
+    return None, 3600
+
+
+def pick_available(endpoints, rr):
+    """Round-robin to the next endpoint not on cooldown; if ALL are cooling down, sleep until
+    the soonest is free (so a background run just paces itself instead of dying)."""
+    n = len(endpoints)
+    for _ in range(n):
+        ep = endpoints[rr[0] % n]
+        rr[0] += 1
+        if ep["cooldown_until"] <= time.time():
+            return ep
+    soonest = min(endpoints, key=lambda e: e["cooldown_until"])
+    wait = max(1.0, soonest["cooldown_until"] - time.time())
+    print(f"[distill] all {n} models cooling down; sleeping {wait:.0f}s ...", flush=True)
+    time.sleep(wait)
+    return soonest
 
 
 def count_existing(path: str) -> int:
@@ -150,17 +201,19 @@ def count_existing(path: str) -> int:
 
 
 def main():
-    p = argparse.ArgumentParser(description="Generate distilled training data from a teacher LLM.")
-    p.add_argument("--provider", default="groq", choices=list(PROVIDERS))
-    p.add_argument("--model", default="openai/gpt-oss-120b",
-                   help="teacher model id (Apache-licensed teachers like gpt-oss-* / qwen3-* "
-                        "are cleanest to train on -- see the licensing note in this file)")
+    p = argparse.ArgumentParser(description="Generate distilled training data from teacher LLMs.")
+    p.add_argument("--provider", default="groq", choices=list(PROVIDERS),
+                   help="default provider for any --models entry without a 'provider:' prefix")
+    p.add_argument("--models", default="openai/gpt-oss-120b",
+                   help="comma list of [provider:]model to ROTATE across (multiplies free "
+                        "throughput + dodges per-model rate limits). e.g. "
+                        "groq:openai/gpt-oss-120b,groq:qwen/qwen3-32b,groq:openai/gpt-oss-20b")
     p.add_argument("--out", default="data_distill/corpus.jsonl")
     p.add_argument("--target_docs", type=int, default=2000, help="stop once the file has this many docs")
     p.add_argument("--recipes", default=",".join(RECIPES),
                    help="comma-separated subset of: " + ",".join(RECIPES))
     p.add_argument("--max_tokens", type=int, default=900)
-    p.add_argument("--sleep", type=float, default=1.0, help="seconds between calls (free-tier friendly)")
+    p.add_argument("--sleep", type=float, default=0.5, help="seconds between successful calls")
     p.add_argument("--dry_run", action="store_true", help="fabricate text instead of calling the API")
     args = p.parse_args()
 
@@ -168,33 +221,41 @@ def main():
     assert recipes, "no valid recipes selected"
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
 
-    url, key_env = PROVIDERS[args.provider]
-    key = os.environ.get(key_env)
-    if not args.dry_run and not key:
-        raise SystemExit(f"Set {key_env} (your {args.provider} API key) -- or use --dry_run to test.")
+    endpoints = parse_endpoints(args.models, args.provider)
+    if not args.dry_run:
+        missing = sorted({e["key_env"] for e in endpoints if not e["key"]})
+        endpoints = [e for e in endpoints if e["key"]]
+        if missing:
+            print(f"[distill] skipping models needing unset keys: {', '.join(missing)}", flush=True)
+        if not endpoints:
+            raise SystemExit("No API keys found. Set GROQ_API_KEY / OPENROUTER_API_KEY, "
+                             "or use --dry_run to test.")
+    label = ", ".join(f"{e['provider']}:{e['model']}" for e in endpoints)
+    print(f"[distill] rotating across {len(endpoints)} model(s): {label}", flush=True)
 
     have = count_existing(args.out)
-    print(f"[distill] out={args.out} | already have {have} docs | target {args.target_docs} | "
-          f"teacher={args.model} ({args.provider})")
+    print(f"[distill] out={args.out} | have {have} docs | target {args.target_docs}", flush=True)
 
-    written, total_chars = 0, 0
-    t0 = time.time()
-    # Open in append mode so re-running resumes (and a Ctrl-C never loses what's on disk).
+    written, total_chars, t0, rr = 0, 0, time.time(), [0]
+    # Append mode so re-running RESUMES, and a Ctrl-C / crash never loses what's on disk.
     with open(args.out, "a", encoding="utf-8") as f:
         while have + written < args.target_docs:
             recipe = random.choice(recipes)
             messages = build_messages(recipe)
 
             if args.dry_run:
-                text = (f"[dry-run/{recipe}] " + messages[1]["content"] + " ") * 8
+                ep = endpoints[rr[0] % len(endpoints)]; rr[0] += 1
+                text = (f"[dry-run/{recipe}/{ep['model']}] " + messages[1]["content"] + " ") * 8
             else:
-                text = call_teacher(url, args.model, key, messages, args.max_tokens)
-                if not text:
-                    print("[distill] a call failed after retries; pausing 30s then continuing.")
-                    time.sleep(30)
+                ep = pick_available(endpoints, rr)
+                text, cooldown = call_one(ep, messages, args.max_tokens)
+                if text is None:                      # rate-limited/errored -> cool it, rotate
+                    ep["cooldown_until"] = time.time() + cooldown
                     continue
 
-            f.write(json.dumps({"text": text, "recipe": recipe}, ensure_ascii=False) + "\n")
+            f.write(json.dumps({"text": text, "recipe": recipe,
+                                "teacher": (None if args.dry_run else ep["model"])},
+                               ensure_ascii=False) + "\n")
             f.flush()
             written += 1
             total_chars += len(text)
@@ -202,13 +263,13 @@ def main():
             if written % 20 == 0 or args.dry_run:
                 rate = written / max(1e-6, time.time() - t0)
                 print(f"[distill] {have + written}/{args.target_docs} docs | "
-                      f"~{total_chars // max(1, written)} chars/doc | {rate:.2f} docs/s")
+                      f"~{total_chars // max(1, written)} chars/doc | {rate:.2f} docs/s", flush=True)
             if not args.dry_run:
                 time.sleep(args.sleep)
 
-    approx_tokens = total_chars // 4   # rough chars->tokens
-    print(f"[distill] done. wrote {written} new docs (~{approx_tokens:,} new tokens) to {args.out}")
-    print("[distill] next: train Dexter on it ->  python train.py --preset distill")
+    print(f"[distill] done. wrote {written} new docs (~{total_chars // 4:,} tokens) to {args.out}",
+          flush=True)
+    print("[distill] next: train Dexter on it ->  python train.py --preset distill", flush=True)
 
 
 if __name__ == "__main__":
