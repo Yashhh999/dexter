@@ -66,17 +66,70 @@ def _synthetic_texts() -> Iterator[str]:
         yield story
 
 
+def _weighted_interleave(sources, weights, seed: int = 42) -> Iterator[str]:
+    """
+    Blend several text iterators into ONE stream, picking the next document from a random
+    source chosen by `weights` (normalized).  This is how we MIX datasets so every batch is a
+    blend of all of them -- as opposed to feeding all of dataset A then all of dataset B,
+    which would make the model learn A then forget it while learning B.
+
+    `sources` is a list of (iterator, text_field) pairs.  Each yielded example is a dict; we
+    pull `text_field` (falling back to "text").  When a source runs dry we drop it and keep
+    going with the rest.  Pure-Python and network-free, so it's unit-testable offline.
+    """
+    rng = random.Random(seed)
+    active = list(range(len(sources)))
+    while active:
+        i = rng.choices(active, weights=[weights[j] for j in active])[0]
+        it, field = sources[i]
+        try:
+            ex = next(it)
+        except StopIteration:
+            active.remove(i)          # this dataset is exhausted; stop drawing from it.
+            continue
+        text = ex.get(field) or ex.get("text") or ""
+        if text:
+            yield text
+
+
+def _mixed_text_iter(cfg: Config) -> Iterator[str]:
+    """Build streaming iterators for every dataset in cfg.dataset_mix and interleave them."""
+    from datasets import load_dataset
+    sources, weights = [], []
+    for entry in cfg.dataset_mix:
+        ds = load_dataset(entry["id"], entry.get("name"),
+                          split=entry.get("split", "train"), streaming=True)
+        sources.append((iter(ds), entry.get("text_field", "text")))
+        weights.append(float(entry.get("weight", 1.0)))
+    names = ", ".join(f'{e["id"]}/{e.get("name","")}={e.get("weight",1)}' for e in cfg.dataset_mix)
+    print(f"[data] mixing {len(sources)} datasets by weight: {names}")
+    yield from _weighted_interleave(sources, weights)
+
+
 def text_iter(cfg: Config) -> Iterator[str]:
     """
-    Yield raw document strings from the TinyStories TRAIN corpus, one at a time.
+    Yield raw document strings, one at a time. Source priority:
+      1. offline  -> built-in synthetic corpus (no network),
+      2. dataset_mix set (v0.3+) -> weighted blend of several datasets,
+      3. else      -> the single dataset_name (v0.1 TinyStories).
 
-    prepare_data() below is what performs the 95/5 train/val split over this single stream,
-    so we only need one source here.
+    prepare_data() performs the 95/5 train/val split over whatever single stream this yields,
+    and tokenizer.py trains the BPE on it too -- so a mix automatically trains the tokenizer
+    on the mix.
     """
     if cfg.offline:
         print("[data] offline=True -> using built-in synthetic corpus.")
         yield from _synthetic_texts()
         return
+
+    if cfg.dataset_mix:
+        try:
+            yield from _mixed_text_iter(cfg)
+            return
+        except Exception as e:
+            print(f"[data] could not stream the dataset mix ({e}); using synthetic corpus.")
+            yield from _synthetic_texts()
+            return
 
     try:
         from datasets import load_dataset

@@ -103,15 +103,29 @@ def prune_checkpoints(ckpt_dir: str, keep: int):
 # HuggingFace Hub sync -- push checkpoints to a model repo so they survive Kaggle sessions
 # =========================================================================================
 def _ckpt_step(name: str) -> int:
-    """Parse the step number out of a 'ckpt_XXXXXX.pt' filename."""
+    """Parse the step number out of a 'ckpt_XXXXXX.pt' filename (ignores any subfolder)."""
     return int(os.path.basename(name).split("_")[1].split(".")[0])
+
+
+def _hf_prefix(cfg) -> str:
+    """Repo path prefix that namespaces a version's checkpoints, e.g. 'v03/' (or '' = root)."""
+    return f"{cfg.hf_subfolder}/" if cfg.hf_subfolder else ""
+
+
+def _hf_list_ckpts(api, cfg):
+    """Sorted (oldest->newest) list of this version's checkpoint paths on the Hub."""
+    prefix = _hf_prefix(cfg)
+    files = [f for f in api.list_repo_files(cfg.hf_repo, repo_type="model")
+             if f.startswith(prefix + "ckpt_") and f.endswith(".pt")]
+    return sorted(files, key=_ckpt_step)
 
 
 def hf_upload_checkpoint(cfg, local_path: str):
     """
-    Upload one checkpoint file to the Hub repo `cfg.hf_repo`, then delete old ones there so
-    only the newest `cfg.hf_keep` remain.  Auth comes from the HF_TOKEN environment variable
-    (set it as a Kaggle Secret; never hard-code it).
+    Upload one checkpoint to the Hub repo `cfg.hf_repo` (under cfg.hf_subfolder so versions
+    don't collide), then delete old ones there so only the newest `cfg.hf_keep` remain.
+    Auth comes from the HF_TOKEN environment variable (set it as a Kaggle Secret; never
+    hard-code it).
 
     Failures are deliberately NON-FATAL: a flaky upload should never kill a training run, so
     we just warn and carry on -- the local checkpoint is still safe on disk.
@@ -123,13 +137,13 @@ def hf_upload_checkpoint(cfg, local_path: str):
         api = HfApi(token=os.environ.get("HF_TOKEN"))
         api.create_repo(repo_id=cfg.hf_repo, repo_type="model", exist_ok=True)
         name = os.path.basename(local_path)
-        api.upload_file(path_or_fileobj=local_path, path_in_repo=name,
+        path_in_repo = _hf_prefix(cfg) + name
+        api.upload_file(path_or_fileobj=local_path, path_in_repo=path_in_repo,
                         repo_id=cfg.hf_repo, repo_type="model",
-                        commit_message=f"checkpoint {name}")
-        print(f"[hf   ] uploaded {name} -> {cfg.hf_repo}")
+                        commit_message=f"checkpoint {path_in_repo}")
+        print(f"[hf   ] uploaded {path_in_repo} -> {cfg.hf_repo}")
         # Prune old checkpoints on the Hub (keep the newest cfg.hf_keep).
-        remote = sorted([f for f in api.list_repo_files(cfg.hf_repo, repo_type="model")
-                         if f.startswith("ckpt_") and f.endswith(".pt")], key=_ckpt_step)
+        remote = _hf_list_ckpts(api, cfg)
         for old in (remote[:-cfg.hf_keep] if cfg.hf_keep > 0 else []):
             api.delete_file(path_in_repo=old, repo_id=cfg.hf_repo, repo_type="model")
             print(f"[hf   ] pruned {old} from the Hub")
@@ -139,9 +153,9 @@ def hf_upload_checkpoint(cfg, local_path: str):
 
 def hf_download_latest(cfg):
     """
-    If the Hub repo has checkpoints, download the newest one into cfg.ckpt_dir so training can
-    resume across a fresh session (e.g. a brand-new Kaggle notebook with no local files).
-    Returns the local path, or None if nothing was fetched.
+    If this version's subfolder on the Hub has checkpoints, download the newest one so training
+    can resume across a fresh session (e.g. a brand-new Kaggle/Colab notebook with no local
+    files). Returns the local path (wherever it landed), or None if nothing was fetched.
     """
     if not cfg.hf_repo:
         return None
@@ -149,8 +163,7 @@ def hf_download_latest(cfg):
         from huggingface_hub import HfApi, hf_hub_download
         token = os.environ.get("HF_TOKEN")
         api = HfApi(token=token)
-        remote = sorted([f for f in api.list_repo_files(cfg.hf_repo, repo_type="model")
-                         if f.startswith("ckpt_") and f.endswith(".pt")], key=_ckpt_step)
+        remote = _hf_list_ckpts(api, cfg)
         if not remote:
             return None
         newest = remote[-1]
@@ -185,7 +198,7 @@ def estimate_val_loss(model, cfg, device, device_batch, autocast_ctx):
 # =========================================================================================
 def main():
     parser = argparse.ArgumentParser(description="Train the from-scratch GPT.")
-    parser.add_argument("--preset", default="tiny", choices=["tiny", "full"])
+    parser.add_argument("--preset", default="tiny", choices=["tiny", "full", "base2"])
     parser.add_argument("--max_steps", type=int, default=None, help="override cfg.max_steps")
     parser.add_argument("--batch_size", type=int, default=None, help="override per-GPU micro-batch")
     parser.add_argument("--log_interval", type=int, default=None,
@@ -272,8 +285,8 @@ def main():
     # Nothing on local disk?  Try the Hub -- this is what lets a brand-new Kaggle session pick
     # up where the previous one left off (local files don't survive a session ending).
     if ckpt_path is None and not args.no_resume and cfg.hf_repo:
-        hf_download_latest(cfg)
-        ckpt_path = latest_checkpoint(cfg.ckpt_dir)
+        # use the downloaded path directly -- with a subfolder it may not be at ckpt_dir root.
+        ckpt_path = hf_download_latest(cfg) or latest_checkpoint(cfg.ckpt_dir)
     if ckpt_path is not None:
         print(f"[resume] loading {ckpt_path}")
         ckpt = torch.load(ckpt_path, map_location=device)

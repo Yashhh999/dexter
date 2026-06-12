@@ -140,7 +140,14 @@ class Config:
     # =====================================================================================
     # 3) DATA / TOKENIZER
     # =====================================================================================
-    dataset_name: str = "roneneldan/TinyStories"  # HuggingFace dataset id.
+    dataset_name: str = "roneneldan/TinyStories"  # single-dataset HuggingFace id (v0.1).
+
+    # For v0.3+ we train on a MIX of datasets instead of one. Each entry is a dict:
+    #   {"id": <hf id>, "name": <config/subset or None>, "split": "train",
+    #    "text_field": <column holding the text>, "weight": <relative sampling weight>}
+    # When dataset_mix is set it overrides dataset_name; sources are interleaved by weight so
+    # every batch is a blend (mixing, not feeding one dataset then the next).
+    dataset_mix: Optional[list] = None
 
     data_dir: str = "data"          # where the pre-tokenized train.bin / val.bin live.
     ckpt_dir: str = "checkpoints"   # where training checkpoints are written.
@@ -162,6 +169,8 @@ class Config:
     # robust way to train across sessions.  Auth uses the HF_TOKEN environment variable -- set
     # it as a Kaggle Secret; never hard-code it.
     hf_repo: str = ""               # e.g. "Yashhh999/dexter".  Empty = no Hub sync.
+    hf_subfolder: str = ""          # subfolder in the repo to keep versions apart, e.g. "v03".
+                                    #   Prevents v0.3 checkpoints from colliding with v0.1's.
     hf_push_interval: int = 500     # upload the latest checkpoint to the Hub every N steps.
     hf_keep: int = 2                # keep only the newest N checkpoints on the Hub (each ~GBs).
 
@@ -278,8 +287,67 @@ def get_config(preset: str = "tiny", **overrides) -> Config:
             hf_keep=2,                     # keep the newest 2 on the Hub (~10 GB).
         )
 
+    elif preset == "base2":
+        # ---- Dexter v0.3: a ~0.5B model on a reasoning-dense data MIX ----------------------
+        # Why ~0.5B (smaller than v0.1's 0.9B)?  On a limited free-compute token budget a
+        # smaller model is LESS undertrained -> better quality.  Bigger vocab + a textbook/web
+        # data mix is where logic + versatility actually enter.  Kept fully separate from v0.1
+        # (own tokenizer/data/checkpoint paths + Hub subfolder) so nothing collides.
+        cfg = Config(
+            preset_name="base2",
+            # architecture -> ~0.52B params
+            vocab_size=16000,       # bigger vocab for broad (non-story) text.
+            n_layer=30,
+            n_head=16,              # 1024 / 16 = 64 dims per head.
+            n_embd=1024,
+            ffn_hidden=4096,
+            block_size=1024,
+            dropout=0.0,
+
+            # batching (fits a single Colab T4 with room; 2x T4 on Kaggle too)
+            batch_size=8,
+            grad_accum_steps=8,
+
+            # optimizer / schedule (slightly higher LR -- smaller model)
+            lr=4e-4, min_lr=4e-5, warmup_steps=500, max_steps=20_000,
+            weight_decay=0.1, beta2=0.95, grad_clip=1.0,
+
+            # precision / memory: fits without paging at this size (paging only slows it down)
+            amp_dtype="float16",
+            use_8bit_adam=True,
+            use_paged_adam=False,
+            use_grad_checkpoint=True,
+
+            # intervals
+            log_interval=50, sample_interval=500, eval_interval=1000, eval_iters=50,
+            ckpt_interval=200, keep_last_checkpoints=2,
+
+            # ---- the data MIX (interleaved by weight). Add code/math sources here later. ----
+            dataset_mix=[
+                {"id": "HuggingFaceTB/smollm-corpus", "name": "cosmopedia-v2",
+                 "text_field": "text", "weight": 0.7},   # synthetic textbooks/explanations
+                {"id": "HuggingFaceTB/smollm-corpus", "name": "fineweb-edu-dedup",
+                 "text_field": "text", "weight": 0.3},   # high-quality educational web text
+            ],
+            # start with a modest token budget; raise once you confirm it trains well.
+            max_train_tokens=500_000_000,
+            max_val_tokens=2_000_000,
+            tokenizer_train_docs=100_000,
+
+            # separate paths so v0.3 never clobbers v0.1's tokenizer/data/checkpoints
+            tokenizer_path="tokenizer_v03.json",
+            data_dir="data_v03",
+            ckpt_dir="checkpoints_v03",
+
+            # checkpoint sync to its own subfolder on the Hub
+            hf_repo="Yashhh999/dexter",
+            hf_subfolder="v03",
+            hf_push_interval=500,
+            hf_keep=2,
+        )
+
     else:
-        raise ValueError(f"Unknown preset {preset!r}. Choose 'tiny' or 'full'.")
+        raise ValueError(f"Unknown preset {preset!r}. Choose 'tiny', 'full', or 'base2'.")
 
     # Apply CLI / programmatic overrides last so they always win.
     for key, value in overrides.items():
@@ -294,10 +362,10 @@ def get_config(preset: str = "tiny", **overrides) -> Config:
 
 
 if __name__ == "__main__":
-    # Run `python config.py` to print both presets and their estimated sizes.
-    for name in ("tiny", "full"):
+    # Run `python config.py` to print the presets and their estimated sizes.
+    for name in ("tiny", "full", "base2"):
         c = get_config(name)
         n = c.num_params_estimate()
-        print(f"[{name:4s}] ~{n/1e6:8.2f}M params | "
+        print(f"[{name:5s}] ~{n/1e6:8.2f}M params | "
               f"{c.n_layer}L {c.n_head}H {c.n_embd}d ffn={c.ffn_hidden} "
               f"ctx={c.block_size} vocab={c.vocab_size}")
