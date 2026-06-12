@@ -60,48 +60,57 @@ synthetic story corpus so it runs with no network at all.
 
 ---
 
-## The real run (Kaggle — the `full` preset, ~0.9B params)
+## The real run — `base2` (v0.3, ~0.5B) on a reasoning-dense data mix
 
-On a Kaggle notebook with **GPU T4 ×2** selected and **Internet → On**:
+`base2` trains a ~0.52B model on a blend (Cosmopedia v2 + FineWeb-Edu). Pick the launch for
+your platform — the flags tune memory/batch and (on Kaggle) actually use both T4s:
 
-```python
-# 0) get the code (the project files are at the repo ROOT). %cd is a notebook magic that
-#    persists across cells; plain `!cd` would NOT.
-!git clone https://github.com/Yashhh999/dexter.git
-%cd dexter
-
-# 1) deps (torch + numpy are already in Kaggle's image)
-!pip install -q datasets tokenizers bitsandbytes
-
-# 2) train. The tokenizer trains once, data is tokenized once to .bin, then it trains.
-#    Kaggle sessions time out — just re-run this cell and it AUTO-RESUMES from the latest
-#    checkpoint in ./checkpoints.  Add e.g. `--max_steps 8000` for a session-sized run.
-!python train.py --preset full
-
-# 3) watch it write
-!python sample.py --preset full --prompt "Once upon a time" --num_samples 3
-```
-
-> The `full` preset uses **PagedAdamW8bit** + gradient checkpointing + `batch_size=2` so the
-> ~0.9B model fits a single 16 GB T4 even though `nn.DataParallel` pins the whole model and
-> its fp32 gradients on GPU 0.
-
-### Surviving Kaggle sessions: checkpoints sync to the HuggingFace Hub
-
-Kaggle deletes a session's files when it ends, so local checkpoints don't carry over to the
-next day. The `full` preset therefore **pushes checkpoints to a HuggingFace model repo**
-(`hf_repo` in [config.py](config.py)) every `hf_push_interval` steps, and on a **fresh start
-it pulls the newest one back** to resume automatically — so you can train across many sessions.
-
-Set your token as a **Kaggle Secret** named `HF_TOKEN` (Add-ons → Secrets), then expose it
-before training:
+**Kaggle (2× T4, Internet On) — use DDP via `torchrun`:**
 ```python
 import os
 from kaggle_secrets import UserSecretsClient
-os.environ["HF_TOKEN"] = UserSecretsClient().get_secret("HF_TOKEN")   # never hard-code the token
+os.environ["HF_TOKEN"] = UserSecretsClient().get_secret("HF_TOKEN")   # set as a Secret; never hard-code
 
-!python train.py --preset full --max_steps 6000
+!git clone https://github.com/Yashhh999/dexter.git
+%cd dexter
+!pip install -q datasets tokenizers bitsandbytes huggingface_hub
+
+# DDP keeps a persistent replica per GPU and only all-reduces gradients -> genuine ~1.8x on 2 T4s.
+!torchrun --standalone --nproc_per_node=2 train.py --preset base2 --kaggle
 ```
+
+**Colab (single GPU) — plain `python`:**
+```python
+from google.colab import userdata
+import os
+os.environ["HF_TOKEN"] = userdata.get("HF_TOKEN")
+
+!git clone https://github.com/Yashhh999/dexter.git
+%cd dexter
+!pip install -q datasets tokenizers bitsandbytes huggingface_hub
+
+!python train.py --preset base2 --colab
+```
+
+> **Why `torchrun` on Kaggle?** Plain `nn.DataParallel` re-copies the whole model across PCIe
+> every step, so 2× T4 was actually *slower* than a single T4. DDP (`--kaggle` under `torchrun`)
+> fixes that. Running `python train.py --kaggle` (no `torchrun`) falls back to a single GPU with
+> a reminder to use `torchrun`.
+
+### Switch between Colab and Kaggle freely (full sync)
+
+Everything needed to resume is synced to the HuggingFace Hub under your `hf_repo`
+(`Yashhh999/dexter`, subfolder per version):
+- **checkpoints** — pushed every `hf_push_interval` (300) steps, newest 2 kept;
+- **tokenizer + tokenized `.bin`** — pushed once after tokenizing.
+
+So on **any fresh session** (new Colab/Kaggle notebook), the same command **pulls the tokenizer,
+the data, and the latest checkpoint, then continues** — no re-tokenizing, no lost progress.
+Local checkpoints save every `ckpt_interval` (100) steps. Just set `HF_TOKEN` and run the same
+launch line; you'll see `[hf ] pulled …` at the top and `[hf ] uploaded …` as it trains.
+
+*(The older `full` (~0.9B, TinyStories) preset still works the same way — it uses
+PagedAdamW8bit + gradient checkpointing to fit a 16 GB T4.)*
 You'll see `[hf ] uploaded ckpt_000500.pt -> <user>/dexter` during training, and
 `[hf ] downloading … to resume` at the top of the next session. The Hub keeps only the newest
 `hf_keep` checkpoints (default 2). Disable the whole thing with `--hf_repo ""`. Uploads that

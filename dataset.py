@@ -155,10 +155,13 @@ def _bin_paths(cfg: Config):
             os.path.join(cfg.data_dir, "val.bin"))
 
 
-def prepare_data(cfg: Config) -> None:
+def prepare_data(cfg: Config) -> bool:
     """
     Tokenize the corpus once and write train.bin + val.bin.  Safe to call every run: if both
     files already exist we return immediately.
+
+    Returns True if it actually tokenized this call, or False if it skipped because the .bin
+    already existed.  train.py uses this to decide whether to upload the fresh data to the Hub.
 
     Split rule: every 20th document goes to validation (=> a deterministic 95/5 split).
     Caps (cfg.max_train_tokens / cfg.max_val_tokens) let local runs finish quickly; set them
@@ -169,7 +172,7 @@ def prepare_data(cfg: Config) -> None:
         tt = os.path.getsize(train_path) // 2  # 2 bytes per uint16 token.
         vt = os.path.getsize(val_path) // 2
         print(f"[data] found existing .bin files (train={tt:,} tok, val={vt:,} tok); skipping.")
-        return
+        return False
 
     os.makedirs(cfg.data_dir, exist_ok=True)
 
@@ -226,6 +229,7 @@ def prepare_data(cfg: Config) -> None:
         flush(val_buf, f_val)
 
     print(f"[data] done. train={train_count:,} tokens, val={val_count:,} tokens.")
+    return True
 
 
 # =========================================================================================

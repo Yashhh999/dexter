@@ -283,7 +283,7 @@ def get_config(preset: str = "tiny", **overrides) -> Config:
 
             # ---- checkpoint sync to the Hub so progress survives Kaggle sessions ----
             hf_repo="Yashhh999/dexter",    # set HF_TOKEN (Kaggle Secret) to enable uploads.
-            hf_push_interval=500,          # push the latest checkpoint every 500 steps.
+            hf_push_interval=300,          # push the latest checkpoint every 300 steps.
             hf_keep=2,                     # keep the newest 2 on the Hub (~10 GB).
         )
 
@@ -320,7 +320,7 @@ def get_config(preset: str = "tiny", **overrides) -> Config:
 
             # intervals
             log_interval=50, sample_interval=500, eval_interval=1000, eval_iters=50,
-            ckpt_interval=200, keep_last_checkpoints=2,
+            ckpt_interval=100, keep_last_checkpoints=2,
 
             # ---- the data MIX (interleaved by weight). Add code/math sources here later. ----
             dataset_mix=[
@@ -342,7 +342,7 @@ def get_config(preset: str = "tiny", **overrides) -> Config:
             # checkpoint sync to its own subfolder on the Hub
             hf_repo="Yashhh999/dexter",
             hf_subfolder="v03",
-            hf_push_interval=500,
+            hf_push_interval=300,
             hf_keep=2,
         )
 
