@@ -100,6 +100,69 @@ def prune_checkpoints(ckpt_dir: str, keep: int):
 
 
 # =========================================================================================
+# HuggingFace Hub sync -- push checkpoints to a model repo so they survive Kaggle sessions
+# =========================================================================================
+def _ckpt_step(name: str) -> int:
+    """Parse the step number out of a 'ckpt_XXXXXX.pt' filename."""
+    return int(os.path.basename(name).split("_")[1].split(".")[0])
+
+
+def hf_upload_checkpoint(cfg, local_path: str):
+    """
+    Upload one checkpoint file to the Hub repo `cfg.hf_repo`, then delete old ones there so
+    only the newest `cfg.hf_keep` remain.  Auth comes from the HF_TOKEN environment variable
+    (set it as a Kaggle Secret; never hard-code it).
+
+    Failures are deliberately NON-FATAL: a flaky upload should never kill a training run, so
+    we just warn and carry on -- the local checkpoint is still safe on disk.
+    """
+    if not cfg.hf_repo:
+        return
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=os.environ.get("HF_TOKEN"))
+        api.create_repo(repo_id=cfg.hf_repo, repo_type="model", exist_ok=True)
+        name = os.path.basename(local_path)
+        api.upload_file(path_or_fileobj=local_path, path_in_repo=name,
+                        repo_id=cfg.hf_repo, repo_type="model",
+                        commit_message=f"checkpoint {name}")
+        print(f"[hf   ] uploaded {name} -> {cfg.hf_repo}")
+        # Prune old checkpoints on the Hub (keep the newest cfg.hf_keep).
+        remote = sorted([f for f in api.list_repo_files(cfg.hf_repo, repo_type="model")
+                         if f.startswith("ckpt_") and f.endswith(".pt")], key=_ckpt_step)
+        for old in (remote[:-cfg.hf_keep] if cfg.hf_keep > 0 else []):
+            api.delete_file(path_in_repo=old, repo_id=cfg.hf_repo, repo_type="model")
+            print(f"[hf   ] pruned {old} from the Hub")
+    except Exception as e:
+        print(f"[hf   ] upload failed ({e}); continuing training (local checkpoint is safe).")
+
+
+def hf_download_latest(cfg):
+    """
+    If the Hub repo has checkpoints, download the newest one into cfg.ckpt_dir so training can
+    resume across a fresh session (e.g. a brand-new Kaggle notebook with no local files).
+    Returns the local path, or None if nothing was fetched.
+    """
+    if not cfg.hf_repo:
+        return None
+    try:
+        from huggingface_hub import HfApi, hf_hub_download
+        token = os.environ.get("HF_TOKEN")
+        api = HfApi(token=token)
+        remote = sorted([f for f in api.list_repo_files(cfg.hf_repo, repo_type="model")
+                         if f.startswith("ckpt_") and f.endswith(".pt")], key=_ckpt_step)
+        if not remote:
+            return None
+        newest = remote[-1]
+        print(f"[hf   ] no local checkpoint; downloading {newest} from {cfg.hf_repo} ...")
+        return hf_hub_download(repo_id=cfg.hf_repo, filename=newest, repo_type="model",
+                               local_dir=cfg.ckpt_dir, token=token)
+    except Exception as e:
+        print(f"[hf   ] could not fetch from the Hub ({e}); starting fresh.")
+        return None
+
+
+# =========================================================================================
 # Validation-loss estimate (no gradients, averaged over several batches)
 # =========================================================================================
 @torch.no_grad()
@@ -131,6 +194,9 @@ def main():
                         help="save a checkpoint every N steps (lower = lose less on a crash)")
     parser.add_argument("--offline", action="store_true", help="use the synthetic corpus (no internet)")
     parser.add_argument("--no_resume", action="store_true", help="ignore existing checkpoints")
+    parser.add_argument("--hf_repo", default=None,
+                        help='HuggingFace repo for checkpoint sync, e.g. "Yashhh999/dexter" '
+                             '(pass "" to disable). Needs the HF_TOKEN env var.')
     parser.add_argument("--device", default=None, help="cuda | cpu (auto if unset)")
     args = parser.parse_args()
 
@@ -144,6 +210,8 @@ def main():
         overrides["log_interval"] = args.log_interval
     if args.ckpt_interval is not None:
         overrides["ckpt_interval"] = args.ckpt_interval
+    if args.hf_repo is not None:
+        overrides["hf_repo"] = args.hf_repo
     if args.offline:
         overrides["offline"] = True
     cfg = get_config(args.preset, **overrides)
@@ -201,6 +269,11 @@ def main():
     start_step = 0
     os.makedirs(cfg.ckpt_dir, exist_ok=True)
     ckpt_path = None if args.no_resume else latest_checkpoint(cfg.ckpt_dir)
+    # Nothing on local disk?  Try the Hub -- this is what lets a brand-new Kaggle session pick
+    # up where the previous one left off (local files don't survive a session ending).
+    if ckpt_path is None and not args.no_resume and cfg.hf_repo:
+        hf_download_latest(cfg)
+        ckpt_path = latest_checkpoint(cfg.ckpt_dir)
     if ckpt_path is not None:
         print(f"[resume] loading {ckpt_path}")
         ckpt = torch.load(ckpt_path, map_location=device)
@@ -266,17 +339,24 @@ def main():
             print(f"[train] step {step:6d}/{cfg.max_steps} | loss {loss_accum:.4f} | "
                   f"lr {lr:.2e} | {tok_per_sec:,.0f} tok/s | ETA {fmt_eta(eta_sec)}")
 
-        # --- checkpoint --------------------------------------------------------------------
+        # --- checkpoint (local) ------------------------------------------------------------
         if step > 0 and step % cfg.ckpt_interval == 0:
             path = os.path.join(cfg.ckpt_dir, f"ckpt_{step:06d}.pt")
             save_checkpoint(path, raw_model, optimizer, scaler, step, cfg)
             print(f"[ckpt ] saved {path}")
             prune_checkpoints(cfg.ckpt_dir, cfg.keep_last_checkpoints)
 
-    # Always save a final checkpoint at the end of the run.
+        # --- checkpoint (HuggingFace Hub) --------------------------------------------------
+        # Less often than local saves (uploads cost bandwidth), but enough to survive the
+        # session being deleted.  Pushes whatever the newest local checkpoint is.
+        if cfg.hf_repo and step > 0 and step % cfg.hf_push_interval == 0:
+            hf_upload_checkpoint(cfg, latest_checkpoint(cfg.ckpt_dir))
+
+    # Always save a final checkpoint at the end of the run (local + Hub).
     final = os.path.join(cfg.ckpt_dir, f"ckpt_{cfg.max_steps:06d}.pt")
     save_checkpoint(final, raw_model, optimizer, scaler, cfg.max_steps - 1, cfg)
     prune_checkpoints(cfg.ckpt_dir, cfg.keep_last_checkpoints)
+    hf_upload_checkpoint(cfg, final)
     print(f"[done ] training complete; final checkpoint {final}")
 
 

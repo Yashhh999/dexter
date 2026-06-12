@@ -155,6 +155,16 @@ class Config:
                                     #   synthetic corpus instead of downloading TinyStories.
                                     #   Lets the pipeline run with no internet.
 
+    # --- HuggingFace Hub checkpoint sync -------------------------------------------------
+    # Kaggle deletes a session's files when it ends, so local checkpoints don't survive to the
+    # next day.  If hf_repo is set, we PUSH checkpoints to a HuggingFace model repo (built for
+    # multi-GB files) and, on a fresh start, PULL the newest one back to resume.  This is the
+    # robust way to train across sessions.  Auth uses the HF_TOKEN environment variable -- set
+    # it as a Kaggle Secret; never hard-code it.
+    hf_repo: str = ""               # e.g. "Yashhh999/dexter".  Empty = no Hub sync.
+    hf_push_interval: int = 500     # upload the latest checkpoint to the Hub every N steps.
+    hf_keep: int = 2                # keep only the newest N checkpoints on the Hub (each ~GBs).
+
     # ------------------------------------------------------------------------------------
     def num_params_estimate(self) -> int:
         """
@@ -261,6 +271,11 @@ def get_config(preset: str = "tiny", **overrides) -> Config:
             max_train_tokens=None,
             max_val_tokens=None,
             tokenizer_train_docs=200_000,  # more docs -> a better-quality BPE vocabulary.
+
+            # ---- checkpoint sync to the Hub so progress survives Kaggle sessions ----
+            hf_repo="Yashhh999/dexter",    # set HF_TOKEN (Kaggle Secret) to enable uploads.
+            hf_push_interval=500,          # push the latest checkpoint every 500 steps.
+            hf_keep=2,                     # keep the newest 2 on the Hub (~10 GB).
         )
 
     else:

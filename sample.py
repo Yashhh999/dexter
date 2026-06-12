@@ -59,7 +59,15 @@ def main():
         raise SystemExit(f"No checkpoint found in '{base_cfg.ckpt_dir}'. Train first.")
 
     print(f"[sample] loading {ckpt_path}")
-    ckpt = torch.load(ckpt_path, map_location=device)
+    # mmap=True keeps the (multi-GB) checkpoint memory-mapped from disk instead of reading it
+    # all into RAM. For generation we only touch the model weights, so the big optimizer state
+    # is never paged in -> peak RAM stays ~= model size (matters on a laptop). map_location is
+    # "cpu" here; the model itself was already moved to `device`, and load_state_dict copies
+    # the weights onto it. Falls back to a normal load on older torch without mmap support.
+    try:
+        ckpt = torch.load(ckpt_path, map_location="cpu", mmap=True)
+    except (TypeError, RuntimeError):
+        ckpt = torch.load(ckpt_path, map_location="cpu")
 
     # Rebuild the exact Config the model was trained with (falls back to the preset if an
     # older checkpoint didn't store one).

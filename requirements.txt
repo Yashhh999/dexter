@@ -11,6 +11,11 @@ datasets
 # HuggingFace tokenizers (Rust-backed) -- trains our byte-level BPE vocabulary.
 tokenizers
 
+# HuggingFace Hub client -- pushes/pulls checkpoints to a model repo so training survives
+# Kaggle sessions (set the HF_TOKEN env var to authenticate). Usually already present because
+# `datasets` depends on it, but listed here to be explicit.
+huggingface_hub
+
 # 8-bit AdamW optimizer. Only needed for the "full" (1.6B) preset on a CUDA GPU; it cuts
 # optimizer memory ~4x so the model fits on a 16 GB T4. Safe to skip for local CPU runs
 # (the code automatically falls back to torch.optim.AdamW when bitsandbytes is unavailable).

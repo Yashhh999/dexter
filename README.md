@@ -86,6 +86,27 @@ On a Kaggle notebook with **GPU T4 ×2** selected and **Internet → On**:
 > ~0.9B model fits a single 16 GB T4 even though `nn.DataParallel` pins the whole model and
 > its fp32 gradients on GPU 0.
 
+### Surviving Kaggle sessions: checkpoints sync to the HuggingFace Hub
+
+Kaggle deletes a session's files when it ends, so local checkpoints don't carry over to the
+next day. The `full` preset therefore **pushes checkpoints to a HuggingFace model repo**
+(`hf_repo` in [config.py](config.py)) every `hf_push_interval` steps, and on a **fresh start
+it pulls the newest one back** to resume automatically — so you can train across many sessions.
+
+Set your token as a **Kaggle Secret** named `HF_TOKEN` (Add-ons → Secrets), then expose it
+before training:
+```python
+import os
+from kaggle_secrets import UserSecretsClient
+os.environ["HF_TOKEN"] = UserSecretsClient().get_secret("HF_TOKEN")   # never hard-code the token
+
+!python train.py --preset full --max_steps 6000
+```
+You'll see `[hf ] uploaded ckpt_000500.pt -> <user>/dexter` during training, and
+`[hf ] downloading … to resume` at the top of the next session. The Hub keeps only the newest
+`hf_keep` checkpoints (default 2). Disable the whole thing with `--hf_repo ""`. Uploads that
+fail (no token, network blip) just print a warning — training never stops for them.
+
 You'll see a log line every 100 steps and a generated paragraph every 500 steps:
 
 ```

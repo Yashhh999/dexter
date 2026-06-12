@@ -6,6 +6,7 @@ tokenizer.json      # the trained BPE tokenizer
 data/               # pre-tokenized train.bin / val.bin
 checkpoints/        # training checkpoints
 *.bin
+*.pt                # model checkpoints (multi-GB) — never commit these; they go to the HF Hub
 
 # Python caches
 __pycache__/
