@@ -380,7 +380,8 @@ def generate_sample(raw_model, tok, cfg, device, max_new_tokens: int = 100):
     # Seed with a single <|endoftext|> token = "start a fresh document".
     idx = torch.tensor([[tok.eot_id]], dtype=torch.long, device=device)
     out = raw_model.generate(idx, max_new_tokens=max_new_tokens,
-                             temperature=0.8, top_k=200, eot_id=tok.eot_id)
+                             temperature=0.8, top_k=200, top_p=0.95,
+                             repetition_penalty=1.1, eot_id=tok.eot_id)
     text = tok.decode(out[0].tolist())
     print("-" * 70)
     print("[sample]", text.strip()[:500])

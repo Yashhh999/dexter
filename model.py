@@ -388,14 +388,20 @@ class GPT(nn.Module):
     @torch.no_grad()
     def generate(self, idx: torch.Tensor, max_new_tokens: int,
                  temperature: float = 1.0, top_k: Optional[int] = None,
+                 top_p: Optional[float] = None, repetition_penalty: float = 1.0,
                  eot_id: Optional[int] = None) -> torch.Tensor:
         """
         Autoregressively extend `idx` (B, T) by sampling one token at a time.
 
-          temperature : >1 = more random/creative, <1 = more greedy/repetitive, 0-ish = argmax.
-          top_k       : if set, sample only from the k most likely tokens (cuts off the
-                       long tail of nonsense).
-          eot_id      : if all sequences emit this token, stop early.
+        Decoding controls (v0.2 -- these shape *how* it writes, often more than the model does):
+          temperature        : >1 = more random/creative, <1 = more focused, 0 = greedy argmax.
+          top_k              : sample only from the k most likely tokens (cuts the nonsense tail).
+          top_p (nucleus)    : sample only from the smallest set of tokens whose probabilities
+                               sum to >= top_p (e.g. 0.9).  Adapts the cutoff to the model's
+                               confidence -- usually nicer/ more creative than a fixed top_k.
+          repetition_penalty : >1 discourages repeating tokens already in the text (1.0 = off).
+                               The single best cure for a model that loops ("the the the ...").
+          eot_id             : if all sequences emit this token, stop early.
         """
         self.eval()
         for _ in range(max_new_tokens):
@@ -404,16 +410,40 @@ class GPT(nn.Module):
             logits = self(idx_cond)              # (B, 1, vocab) from the inference path above.
             logits = logits[:, -1, :]            # (B, vocab): scores for the next token.
 
+            # --- repetition penalty: push DOWN the score of any token already generated -------
+            # (Keskar et al. / CTRL): for already-seen tokens, divide a positive logit by the
+            # penalty or multiply a negative one -- both reduce that token's probability.
+            if repetition_penalty != 1.0:
+                seen = torch.gather(logits, 1, idx)           # logits of the tokens in `idx`
+                seen = torch.where(seen > 0, seen / repetition_penalty,
+                                   seen * repetition_penalty)
+                logits.scatter_(1, idx, seen)
+
             if temperature <= 0:
                 # Greedy: always take the single most likely token.
                 idx_next = torch.argmax(logits, dim=-1, keepdim=True)
             else:
                 logits = logits / temperature
+
+                # --- top-k: keep only the k highest-scoring tokens ----------------------------
                 if top_k is not None:
                     k = min(top_k, logits.size(-1))
                     v, _ = torch.topk(logits, k)
-                    # Mask everything below the k-th best down to -inf so it can't be sampled.
                     logits[logits < v[:, [-1]]] = float("-inf")
+
+                # --- top-p (nucleus): keep the smallest set summing to >= top_p ---------------
+                if top_p is not None and 0.0 < top_p < 1.0:
+                    sorted_logits, sorted_idx = torch.sort(logits, descending=True, dim=-1)
+                    cumprobs = F.softmax(sorted_logits, dim=-1).cumsum(dim=-1)
+                    # Remove tokens once the cumulative prob has passed top_p, but always keep
+                    # the first (most likely) token so we never mask everything.
+                    remove = cumprobs > top_p
+                    remove[..., 1:] = remove[..., :-1].clone()
+                    remove[..., 0] = False
+                    # Map the removal mask back to the original (unsorted) vocab order.
+                    remove = remove.scatter(1, sorted_idx, remove)
+                    logits = logits.masked_fill(remove, float("-inf"))
+
                 probs = F.softmax(logits, dim=-1)
                 idx_next = torch.multinomial(probs, num_samples=1)  # (B, 1)
 

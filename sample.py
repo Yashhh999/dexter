@@ -45,6 +45,10 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.8,
                         help=">1 = more random, <1 = more focused, 0 = greedy")
     parser.add_argument("--top_k", type=int, default=200, help="sample only from the top-k tokens")
+    parser.add_argument("--top_p", type=float, default=0.95,
+                        help="nucleus sampling: keep the smallest set summing to >= top_p (0/1 = off)")
+    parser.add_argument("--repetition_penalty", type=float, default=1.1,
+                        help=">1 discourages repeating tokens (1.0 = off)")
     parser.add_argument("--num_samples", type=int, default=1)
     parser.add_argument("--device", default=None, help="cuda | cpu (auto if unset)")
     args = parser.parse_args()
@@ -95,6 +99,8 @@ def main():
             max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
             top_k=args.top_k,
+            top_p=args.top_p,
+            repetition_penalty=args.repetition_penalty,
             eot_id=tok.eot_id,
         )
         text = tok.decode(out[0].tolist())
