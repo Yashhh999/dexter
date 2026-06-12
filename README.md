@@ -126,6 +126,36 @@ You'll see a log line every 100 steps and a generated paragraph every 500 steps:
 
 ---
 
+## Distillation: teach Dexter with a big teacher model (`distill` preset)
+
+The highest-leverage "more capability per training token" trick you can run yourself:
+have a **big teacher** (gpt-oss-120b / qwen3-32b via Groq or OpenRouter, both free) write a
+clean, reasoning-dense corpus, then train your small Dexter *student* on it. This is the
+"Textbooks Are All You Need" / Cosmopedia recipe — teacher-written data beats raw web text
+token-for-token. The student won't match the teacher, but it learns far more per token.
+
+```bash
+# 1) generate the corpus (resumable, rate-limit aware; runs over days on a free tier)
+export GROQ_API_KEY=...                 # or OPENROUTER_API_KEY + --provider openrouter
+python distill_generate.py --provider groq --model openai/gpt-oss-120b --target_docs 5000
+#    test the loop with no key:  python distill_generate.py --dry_run --target_docs 20
+
+# 2) train Dexter on it (blended with web data for volume). Same DDP / platform flags:
+torchrun --standalone --nproc_per_node=2 train.py --preset distill --kaggle   # Kaggle
+python train.py --preset distill --colab                                       # Colab
+```
+
+The `distill` preset's data mix leads with `data_distill/corpus.jsonl` (your generated data),
+blended with Cosmopedia/FineWeb-Edu. It keeps its own tokenizer/data/checkpoints and Hub
+subfolder (`distill/`), so it never collides with the other presets.
+
+> **Licensing:** you train on the teacher's *outputs*, so the teacher's license matters.
+> **gpt-oss-20b/120b and qwen3-32b are Apache-2.0** → clean to train on (good defaults). Llama's
+> license has clauses about using outputs to train other models — check before using it as the
+> teacher. Credit the teacher in your model card.
+
+---
+
 ## Why the `full` preset is ~0.9B (and why DataParallel forces that)
 
 The original spec — 24 layers, dim **2048**, FFN **8192**, SwiGLU — is actually
@@ -214,3 +244,10 @@ the `full` preset sets them to `None` to use the whole corpus.
 
 *Built to be read. Every file is commented to explain not just **what** each piece does but
 **why** it's there.*
+
+
+Run cmd :- 
+# Kaggle (2× T4):
+!torchrun --standalone --nproc_per_node=2 train.py --preset base2 --kaggle
+# Colab (1 GPU):
+!python train.py --preset base2 --colab

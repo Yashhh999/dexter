@@ -320,7 +320,7 @@ def estimate_val_loss(model, cfg, device, device_batch, autocast_ctx):
 # =========================================================================================
 def main():
     parser = argparse.ArgumentParser(description="Train the from-scratch GPT.")
-    parser.add_argument("--preset", default="tiny", choices=["tiny", "full", "base2"])
+    parser.add_argument("--preset", default="tiny", choices=["tiny", "full", "base2", "distill"])
     parser.add_argument("--max_steps", type=int, default=None, help="override cfg.max_steps")
     parser.add_argument("--batch_size", type=int, default=None, help="override per-GPU micro-batch")
     parser.add_argument("--log_interval", type=int, default=None,

@@ -37,7 +37,7 @@ def latest_checkpoint(ckpt_dir: str):
 
 def main():
     parser = argparse.ArgumentParser(description="Generate text from a trained checkpoint.")
-    parser.add_argument("--preset", default="tiny", choices=["tiny", "full", "base2"],
+    parser.add_argument("--preset", default="tiny", choices=["tiny", "full", "base2", "distill"],
                         help="which preset's checkpoint/tokenizer dir to use by default")
     parser.add_argument("--ckpt", default=None, help="path to a specific checkpoint .pt")
     parser.add_argument("--prompt", default="", help="text to continue (empty = free generation)")

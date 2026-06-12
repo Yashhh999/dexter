@@ -346,8 +346,42 @@ def get_config(preset: str = "tiny", **overrides) -> Config:
             hf_keep=2,
         )
 
+    elif preset == "distill":
+        # ---- Dexter "distill": ~0.5B student trained on TEACHER-DISTILLED data --------------
+        # Same architecture as base2, but the data mix is led by the synthetic corpus written
+        # by a big teacher model (see distill_generate.py), blended with web data for volume.
+        # Learning from teacher-written documents beats raw web text per token -> "more with
+        # less".  Fully separate paths so it never clobbers base2/full.
+        cfg = Config(
+            preset_name="distill",
+            vocab_size=16000, n_layer=30, n_head=16, n_embd=1024, ffn_hidden=4096,
+            block_size=1024, dropout=0.0,
+            batch_size=8, grad_accum_steps=8,
+            lr=4e-4, min_lr=4e-5, warmup_steps=500, max_steps=20_000,
+            weight_decay=0.1, beta2=0.95, grad_clip=1.0,
+            amp_dtype="float16", use_8bit_adam=True, use_paged_adam=False, use_grad_checkpoint=True,
+            log_interval=50, sample_interval=500, eval_interval=1000, eval_iters=50,
+            ckpt_interval=100, keep_last_checkpoints=2,
+
+            # ---- data: teacher-distilled corpus FIRST, then web data to fill the volume -----
+            dataset_mix=[
+                {"path": "data_distill/corpus.jsonl", "text_field": "text", "weight": 0.6},
+                {"id": "HuggingFaceTB/smollm-corpus", "name": "cosmopedia-v2",
+                 "text_field": "text", "weight": 0.3},
+                {"id": "HuggingFaceTB/smollm-corpus", "name": "fineweb-edu-dedup",
+                 "text_field": "text", "weight": 0.1},
+            ],
+            max_train_tokens=500_000_000, max_val_tokens=2_000_000, tokenizer_train_docs=100_000,
+
+            tokenizer_path="tokenizer_distill.json",
+            data_dir="data_distill",            # corpus.jsonl + train/val.bin live here
+            ckpt_dir="checkpoints_distill",
+            hf_repo="Yashhh999/dexter", hf_subfolder="distill",
+            hf_push_interval=300, hf_keep=2,
+        )
+
     else:
-        raise ValueError(f"Unknown preset {preset!r}. Choose 'tiny', 'full', or 'base2'.")
+        raise ValueError(f"Unknown preset {preset!r}. Choose tiny/full/base2/distill.")
 
     # Apply CLI / programmatic overrides last so they always win.
     for key, value in overrides.items():
@@ -363,7 +397,7 @@ def get_config(preset: str = "tiny", **overrides) -> Config:
 
 if __name__ == "__main__":
     # Run `python config.py` to print the presets and their estimated sizes.
-    for name in ("tiny", "full", "base2"):
+    for name in ("tiny", "full", "base2", "distill"):
         c = get_config(name)
         n = c.num_params_estimate()
         print(f"[{name:5s}] ~{n/1e6:8.2f}M params | "

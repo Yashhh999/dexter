@@ -24,6 +24,7 @@ If there is no internet (or cfg.offline=True) we fall back to a small built-in s
 
 from __future__ import annotations
 
+import json
 import os
 import random
 from typing import Iterator, Optional
@@ -92,17 +93,45 @@ def _weighted_interleave(sources, weights, seed: int = 42) -> Iterator[str]:
             yield text
 
 
+def _jsonl_iter(path: str) -> Iterator[dict]:
+    """Yield parsed objects from a local .jsonl file (e.g. distill_generate.py's output).
+    Loops forever so a small distilled corpus can be mixed alongside huge web datasets without
+    running dry first (interleaving stops when the OTHER, finite sources are exhausted)."""
+    while True:
+        produced = False
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield json.loads(line)
+                    produced = True
+                except json.JSONDecodeError:
+                    continue
+        if not produced:        # empty file -> don't spin forever
+            return
+
+
 def _mixed_text_iter(cfg: Config) -> Iterator[str]:
-    """Build streaming iterators for every dataset in cfg.dataset_mix and interleave them."""
-    from datasets import load_dataset
+    """
+    Build iterators for every source in cfg.dataset_mix and interleave them by weight.
+    A source entry is either a HuggingFace dataset ({"id": ...}) or a local jsonl file
+    ({"path": "data_distill/corpus.jsonl"}) -- so teacher-distilled data can be blended in.
+    """
     sources, weights = [], []
     for entry in cfg.dataset_mix:
-        ds = load_dataset(entry["id"], entry.get("name"),
-                          split=entry.get("split", "train"), streaming=True)
-        sources.append((iter(ds), entry.get("text_field", "text")))
+        if entry.get("path"):                         # local distilled corpus
+            sources.append((_jsonl_iter(entry["path"]), entry.get("text_field", "text")))
+        else:                                         # streamed HuggingFace dataset
+            from datasets import load_dataset
+            ds = load_dataset(entry["id"], entry.get("name"),
+                              split=entry.get("split", "train"), streaming=True)
+            sources.append((iter(ds), entry.get("text_field", "text")))
         weights.append(float(entry.get("weight", 1.0)))
-    names = ", ".join(f'{e["id"]}/{e.get("name","")}={e.get("weight",1)}' for e in cfg.dataset_mix)
-    print(f"[data] mixing {len(sources)} datasets by weight: {names}")
+    names = ", ".join(f'{e.get("id") or e.get("path")}={e.get("weight", 1)}'
+                      for e in cfg.dataset_mix)
+    print(f"[data] mixing {len(sources)} sources by weight: {names}")
     yield from _weighted_interleave(sources, weights)
 
 
