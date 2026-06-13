@@ -54,8 +54,8 @@ def train_tokenizer(cfg: Config) -> "Tokenizer":
         print(f"[tokenizer] found existing '{cfg.tokenizer_path}', loading (no retrain).")
         return Tokenizer(cfg.tokenizer_path)
 
-    print(f"[tokenizer] training a {cfg.vocab_size}-token byte-level BPE on "
-          f"{cfg.dataset_name} ...")
+    _src = "the dataset mix" if getattr(cfg, "dataset_mix", None) else cfg.dataset_name
+    print(f"[tokenizer] training a {cfg.vocab_size}-token byte-level BPE on {_src} ...")
 
     # 1) The MODEL: an (initially empty) BPE.  unk_token=None because byte-level BPE never
     #    needs an unknown token -- every byte is representable.
