@@ -327,6 +327,12 @@ def main():
                         help="print a train log every N steps (lower = faster feedback)")
     parser.add_argument("--ckpt_interval", type=int, default=None,
                         help="save a checkpoint every N steps (lower = lose less on a crash)")
+    parser.add_argument("--grad_accum", type=int, default=None,
+                        help="override grad_accum_steps (lower = fewer, bigger steps -> better "
+                             "GPU utilization on a fast GPU)")
+    parser.add_argument("--no_grad_ckpt", action="store_true",
+                        help="disable gradient checkpointing -> faster on big-VRAM GPUs "
+                             "(L40S/A100) that don't need it (uses more VRAM)")
     parser.add_argument("--offline", action="store_true", help="use the synthetic corpus (no internet)")
     parser.add_argument("--no_resume", action="store_true", help="ignore existing checkpoints")
     parser.add_argument("--hf_repo", default=None,
@@ -354,6 +360,10 @@ def main():
         overrides["log_interval"] = args.log_interval
     if args.ckpt_interval is not None:
         overrides["ckpt_interval"] = args.ckpt_interval
+    if args.grad_accum is not None:
+        overrides["grad_accum_steps"] = args.grad_accum
+    if args.no_grad_ckpt:
+        overrides["use_grad_checkpoint"] = False
     if args.hf_repo is not None:
         overrides["hf_repo"] = args.hf_repo
     if args.offline:

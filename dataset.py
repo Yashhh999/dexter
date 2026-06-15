@@ -290,11 +290,15 @@ def get_batch(split: str, cfg: Config, device: str, batch_size: Optional[int] = 
         f"{path} has only {len(data)} tokens, too few for block_size={cfg.block_size}. "
         f"Increase the token caps in config.py."
     )
-    ix = torch.randint(max_start, (bs,))
+    block = cfg.block_size
+    ix = np.random.randint(0, max_start, size=bs)
 
-    # Slice out the windows and convert to int64 tensors (the dtype embeddings expect).
-    x = torch.stack([torch.from_numpy(data[i:i + cfg.block_size].astype(np.int64)) for i in ix])
-    y = torch.stack([torch.from_numpy(data[i + 1:i + 1 + cfg.block_size].astype(np.int64)) for i in ix])
+    # VECTORIZED gather (no Python loop): build a (bs, block) index matrix and let numpy slice
+    # all windows at once in C.  The old per-sequence list-comprehension was a CPU bottleneck
+    # that starved fast GPUs (low utilization on an L40S/A100); this keeps them fed.
+    win = ix[:, None] + np.arange(block)[None, :]          # (bs, block) absolute positions
+    x = torch.from_numpy(data[win].astype(np.int64))        # inputs
+    y = torch.from_numpy(data[win + 1].astype(np.int64))    # next-token targets
 
     if device.startswith("cuda"):
         # pin_memory + non_blocking lets the host->GPU copy overlap with compute.
