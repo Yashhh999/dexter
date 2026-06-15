@@ -30,6 +30,11 @@ import glob
 from contextlib import nullcontext
 from datetime import timedelta
 
+# Reduce CUDA memory fragmentation so a given batch fits more reliably (the OOM messages that
+# mention "reserved but unallocated" memory are fragmentation). Must be set BEFORE torch inits
+# CUDA; setdefault so an explicit PYTORCH_CUDA_ALLOC_CONF from the user still wins.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 import torch.distributed as dist
 
