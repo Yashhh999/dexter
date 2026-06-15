@@ -77,13 +77,13 @@ def apply_platform(cfg, args):
     gradient-gather buffer, so both can drop the slow PAGED optimizer for the fast on-GPU 8-bit
     one.  We also size the per-GPU batch sensibly per platform (CLI --batch_size still wins).
     """
-    if not (args.colab or args.kaggle):
+    single = args.colab or args.single        # any single-GPU box (Colab / Lightning L4 / local)
+    if not (single or args.kaggle):
         return
     cfg.use_paged_adam = False     # no DataParallel gather buffer -> non-paged fits and is fast
-    if args.batch_size is None:    # don't clobber an explicit --batch_size
-        if cfg.preset_name == "base2":
-            cfg.batch_size = 12 if args.colab else 8
-    tag = "colab (single GPU)" if args.colab else "kaggle (2x T4, DDP)"
+    if args.batch_size is None and cfg.preset_name in ("base2", "distill"):
+        cfg.batch_size = 12 if single else 8   # single GPU has room for a bigger micro-batch
+    tag = "single GPU" if single else "kaggle (2x T4, DDP)"
     print(f"[platform] tuned for {tag}: non-paged adam, batch_size={cfg.batch_size}/GPU")
 
 
@@ -332,15 +332,17 @@ def main():
     parser.add_argument("--hf_repo", default=None,
                         help='HuggingFace repo for checkpoint sync, e.g. "Yashhh999/dexter" '
                              '(pass "" to disable). Needs the HF_TOKEN env var.')
+    parser.add_argument("--single", action="store_true",
+                        help="optimize for ANY single GPU (Lightning L4 / local / etc.) -- no DDP")
     parser.add_argument("--colab", action="store_true",
-                        help="optimize for a single Colab GPU (no DataParallel/DDP)")
+                        help="alias of --single (single Colab GPU)")
     parser.add_argument("--kaggle", action="store_true",
                         help="optimize for Kaggle 2x T4 via DDP "
                              "(launch with: torchrun --nproc_per_node=2 train.py ... --kaggle)")
     parser.add_argument("--device", default=None, help="cuda | cpu (auto if unset)")
     args = parser.parse_args()
-    if args.colab and args.kaggle:
-        raise SystemExit("Pick one of --colab / --kaggle, not both.")
+    if args.kaggle and (args.colab or args.single):
+        raise SystemExit("Pick one of --single/--colab (1 GPU) OR --kaggle (2x T4 DDP), not both.")
 
     # ---- assemble config from preset + CLI overrides --------------------------------------
     overrides = {}
@@ -421,7 +423,7 @@ def main():
         if master:
             print(f"[model] DistributedDataParallel across {world_size} processes "
                   f"({cfg.batch_size}/GPU).")
-    elif args.colab or args.kaggle:
+    elif args.colab or args.single or args.kaggle:
         if args.kaggle and num_gpus > 1:                     # --kaggle without torchrun
             print("[platform] --kaggle but NOT launched with torchrun -> using ONE GPU. For "
                   "real 2x T4 speed run:\n"

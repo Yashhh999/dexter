@@ -35,6 +35,46 @@ def latest_checkpoint(ckpt_dir: str):
     return max(paths, key=lambda p: int(os.path.basename(p).split("_")[1].split(".")[0]))
 
 
+def pull_from_hf(cfg, want_ckpt=True):
+    """
+    On a fresh session (e.g. a new Lightning/Colab box), fetch the tokenizer and the latest
+    checkpoint from the Hub if they're not already local -- so sampling works WITHOUT manual
+    downloads (this is what fixes 'tokenizer not found').  Needs HF_TOKEN only for a private
+    repo.  Non-fatal: any failure just falls through to the normal local-file path.
+    """
+    if not getattr(cfg, "hf_repo", ""):
+        return
+    try:
+        import shutil
+        from huggingface_hub import HfApi, hf_hub_download
+        token = os.environ.get("HF_TOKEN")
+        api = HfApi(token=token)
+        prefix = (cfg.hf_subfolder + "/") if cfg.hf_subfolder else ""
+        files = api.list_repo_files(cfg.hf_repo, repo_type="model")
+
+        # tokenizer (small): {prefix}data/<tokenizer filename>
+        tok_remote = prefix + "data/" + os.path.basename(cfg.tokenizer_path)
+        if not os.path.exists(cfg.tokenizer_path) and tok_remote in files:
+            shutil.copy(hf_hub_download(cfg.hf_repo, tok_remote, repo_type="model", token=token),
+                        cfg.tokenizer_path)
+            print(f"[sample] pulled tokenizer {tok_remote}")
+
+        # latest checkpoint: {prefix}ckpt_XXXXXX.pt  (flattened into ckpt_dir)
+        if want_ckpt and latest_checkpoint(cfg.ckpt_dir) is None:
+            ckpts = sorted([f for f in files if f.startswith(prefix + "ckpt_") and f.endswith(".pt")],
+                           key=lambda f: int(os.path.basename(f).split("_")[1].split(".")[0]))
+            if ckpts:
+                os.makedirs(cfg.ckpt_dir, exist_ok=True)
+                local = hf_hub_download(cfg.hf_repo, ckpts[-1], repo_type="model",
+                                        token=token, local_dir=cfg.ckpt_dir)
+                flat = os.path.join(cfg.ckpt_dir, os.path.basename(ckpts[-1]))
+                if os.path.abspath(local) != os.path.abspath(flat):
+                    shutil.copy(local, flat)
+                print(f"[sample] pulled checkpoint {ckpts[-1]}")
+    except Exception as e:
+        print(f"[sample] HF auto-pull skipped ({e})")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate text from a trained checkpoint.")
     parser.add_argument("--preset", default="tiny", choices=["tiny", "full", "base2", "distill"],
@@ -58,6 +98,9 @@ def main():
     # Use the preset only to locate the checkpoint dir + tokenizer path; the ACTUAL model
     # shape comes from the checkpoint itself.
     base_cfg = get_config(args.preset)
+    # Fresh session? pull the checkpoint + tokenizer from the Hub so we don't hit
+    # "tokenizer not found" / "no checkpoint" (set HF_TOKEN for a private repo).
+    pull_from_hf(base_cfg, want_ckpt=(args.ckpt is None))
     ckpt_path = args.ckpt or latest_checkpoint(base_cfg.ckpt_dir)
     if ckpt_path is None:
         raise SystemExit(f"No checkpoint found in '{base_cfg.ckpt_dir}'. Train first.")
