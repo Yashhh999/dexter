@@ -41,6 +41,34 @@ def build_prompt(user_message: str) -> str:
     return SFT_TEMPLATE.format(instr=user_message.strip(), resp="")
 
 
+# In-chat slash commands let you tweak generation live, no restart: "/temp 0.5", "/temp:0.5",
+# "/top_p 0.85", etc.  Maps each command alias to (key in the gen dict, value caster).
+SETTINGS = {
+    "temp": ("temperature", float), "temperature": ("temperature", float),
+    "topp": ("top_p", float), "top_p": ("top_p", float),
+    "topk": ("top_k", int), "top_k": ("top_k", int),
+    "rep": ("repetition_penalty", float), "repetition_penalty": ("repetition_penalty", float),
+    "max": ("max_new_tokens", int), "maxtokens": ("max_new_tokens", int),
+}
+
+_HELP = (
+    "commands (also accept the colon form, e.g. /temp:0.5):\n"
+    "  /temp <v>    sampling temperature (0 = greedy, higher = wilder)\n"
+    "  /top_p <v>   nucleus cutoff 0-1 (0/1 = off)\n"
+    "  /top_k <n>   keep only the top-k tokens\n"
+    "  /rep <v>     repetition penalty (1 = off)\n"
+    "  /max <n>     max new tokens per reply\n"
+    "  /config      show current settings\n"
+    "  /reset       restore defaults\n"
+    "  /help        this list\n"
+    "  /exit        quit"
+)
+
+
+def _fmt_settings(gen: dict) -> str:
+    return " | ".join(f"{k}={v}" for k, v in gen.items())
+
+
 def main():
     parser = argparse.ArgumentParser(description="Chat with the SFT (v0.4) model.")
     parser.add_argument("--preset", default="sft",
@@ -78,7 +106,12 @@ def main():
     model.eval()
     tok = Tokenizer(cfg.tokenizer_path)
     print(f"[chat] {model.num_params()/1e6:.2f}M params, step {ckpt.get('step', '?')} | "
-          f"device={device}. Type 'exit' to quit.\n")
+          f"device={device}. Type a message; '/help' for commands, 'exit' to quit.\n")
+
+    # Live-tweakable generation settings (start from the CLI args; change with slash commands).
+    defaults = dict(temperature=args.temperature, top_k=args.top_k, top_p=args.top_p,
+                    repetition_penalty=args.repetition_penalty, max_new_tokens=args.max_new_tokens)
+    gen = dict(defaults)
 
     while True:
         try:
@@ -88,22 +121,43 @@ def main():
             break
         if not user:
             continue
+
+        # ---- slash commands: change settings live without restarting --------------------
+        if user.startswith("/"):
+            parts = user[1:].replace(":", " ", 1).split()   # "/temp:0.5" -> ["temp","0.5"]
+            cmd = parts[0].lower() if parts else "help"
+            if cmd in ("exit", "quit", "q"):
+                break
+            elif cmd in ("help", "h"):
+                print(_HELP + "\n")
+            elif cmd in ("config", "show", "settings"):
+                print(_fmt_settings(gen) + "\n")
+            elif cmd == "reset":
+                gen = dict(defaults)
+                print("reset -> " + _fmt_settings(gen) + "\n")
+            elif cmd in SETTINGS:
+                key, cast = SETTINGS[cmd]
+                if len(parts) < 2:
+                    print(f"{key} = {gen[key]}  (usage: /{cmd} <value>)\n")
+                else:
+                    try:
+                        gen[key] = cast(parts[1])
+                        print(f"{key} = {gen[key]}\n")
+                    except ValueError:
+                        print(f"bad value for /{cmd}: {parts[1]!r}\n")
+            else:
+                print(f"unknown command /{cmd} (try /help)\n")
+            continue
+
         if user.lower() in ("exit", "quit"):
             break
 
+        # ---- normal turn ----------------------------------------------------------------
         # Seed with <eot> (= "start a fresh document", matching how every SFT example was framed
         # after the previous document's trailing <eot>), then the templated instruction.
         start_ids = [tok.eot_id] + tok.encode(build_prompt(user))
         idx = torch.tensor([start_ids], dtype=torch.long, device=device)
-        out = model.generate(
-            idx,
-            max_new_tokens=args.max_new_tokens,
-            temperature=args.temperature,
-            top_k=args.top_k,
-            top_p=args.top_p,
-            repetition_penalty=args.repetition_penalty,
-            eot_id=tok.eot_id,
-        )
+        out = model.generate(idx, eot_id=tok.eot_id, **gen)   # gen = the live settings dict
 
         # Decode ONLY the newly generated tokens (everything after the prompt) -> just the answer.
         gen_ids = out[0].tolist()[len(start_ids):]
