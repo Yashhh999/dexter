@@ -365,7 +365,7 @@ def get_config(preset: str = "tiny", **overrides) -> Config:
 
             # ---- data: teacher-distilled corpus FIRST, then web data to fill the volume -----
             dataset_mix=[
-                {"path": "data_distill/corpus.jsonl", "text_field": "text", "weight": 0.6},
+                {"path": "corpus.jsonl", "text_field": "text", "weight": 0.6},  # bundled in repo
                 {"id": "HuggingFaceTB/smollm-corpus", "name": "cosmopedia-v2",
                  "text_field": "text", "weight": 0.3},
                 {"id": "HuggingFaceTB/smollm-corpus", "name": "fineweb-edu-dedup",
