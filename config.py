@@ -408,10 +408,15 @@ def get_config(preset: str = "tiny", **overrides) -> Config:
 
             # ---- instruction data MIX (dataset.py templates each into ### Instruction/Response)
             dataset_mix=[
-                {"id": "teknium/OpenHermes-2.5", "format": "sharegpt", "weight": 0.5},
-                {"id": "yahma/alpaca-cleaned", "format": "alpaca", "weight": 0.3},
+                {"id": "teknium/OpenHermes-2.5", "format": "sharegpt", "weight": 0.4},
+                {"id": "yahma/alpaca-cleaned", "format": "alpaca", "weight": 0.25},
+                # natural assistant conversation -> teaches greetings / casual "hi" / chat turns
+                # (UltraChat uses a "messages" list of {role, content}; our sharegpt formatter
+                # handles role/content as well as from/value).
+                {"id": "HuggingFaceH4/ultrachat_200k", "split": "train_sft",
+                 "format": "sharegpt", "conv_field": "messages", "weight": 0.2},
                 {"id": "openai/gsm8k", "name": "main", "format": "qa",
-                 "prompt_field": "question", "response_field": "answer", "weight": 0.2},
+                 "prompt_field": "question", "response_field": "answer", "weight": 0.15},
             ],
             max_train_tokens=60_000_000, max_val_tokens=1_000_000,
 
