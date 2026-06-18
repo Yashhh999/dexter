@@ -380,8 +380,52 @@ def get_config(preset: str = "tiny", **overrides) -> Config:
             hf_push_interval=300, hf_keep=2,
         )
 
+    elif preset == "sft":
+        # ---- Dexter v0.4 (SFT): instruction-tune the v0.3 base to FOLLOW prompts ------------
+        # This is NOT pretraining.  Load the finished base2 weights (train.py --init_from <ckpt>)
+        # and fine-tune on instruction->response data that dataset.py templates into text.
+        # It MUST match base2's architecture AND reuse base2's tokenizer (tokenizer_v03.json) --
+        # a fresh tokenizer would scramble the loaded embeddings.
+        cfg = Config(
+            preset_name="sft",
+            # architecture: identical to base2 (required to load its checkpoint)
+            vocab_size=16000, n_layer=30, n_head=16, n_embd=1024, ffn_hidden=4096,
+            block_size=1024, dropout=0.0,
+
+            # batching: a modest effective batch is fine (and good) for SFT
+            batch_size=16, grad_accum_steps=4,        # effective 64 sequences / step
+
+            # optimizer/schedule: LOW lr + short warmup -- fine-tuning nudges, it doesn't relearn
+            lr=2e-5, min_lr=2e-6, warmup_steps=100, max_steps=2_000,
+            weight_decay=0.1, beta2=0.95, grad_clip=1.0,
+
+            amp_dtype="float16", use_8bit_adam=True, use_paged_adam=False, use_grad_checkpoint=True,
+
+            # intervals: SFT is short, so look more often; keep MANY checkpoints this time so a
+            # rotation never deletes the best one (the v0.3 lesson learned the hard way).
+            log_interval=20, sample_interval=200, eval_interval=200, eval_iters=50,
+            ckpt_interval=200, keep_last_checkpoints=8,
+
+            # ---- instruction data MIX (dataset.py templates each into ### Instruction/Response)
+            dataset_mix=[
+                {"id": "teknium/OpenHermes-2.5", "format": "sharegpt", "weight": 0.5},
+                {"id": "yahma/alpaca-cleaned", "format": "alpaca", "weight": 0.3},
+                {"id": "openai/gsm8k", "name": "main", "format": "qa",
+                 "prompt_field": "question", "response_field": "answer", "weight": 0.2},
+            ],
+            max_train_tokens=60_000_000, max_val_tokens=1_000_000,
+
+            # REUSE base2's tokenizer -- do NOT retrain (the loaded weights depend on it).
+            tokenizer_path="tokenizer_v03.json",
+            data_dir="data_sft",
+            ckpt_dir="checkpoints_sft",
+
+            hf_repo="Yashhh999/dexter", hf_subfolder="sft",
+            hf_push_interval=400, hf_keep=8,
+        )
+
     else:
-        raise ValueError(f"Unknown preset {preset!r}. Choose tiny/full/base2/distill.")
+        raise ValueError(f"Unknown preset {preset!r}. Choose tiny/full/base2/distill/sft.")
 
     # Apply CLI / programmatic overrides last so they always win.
     for key, value in overrides.items():
@@ -397,7 +441,7 @@ def get_config(preset: str = "tiny", **overrides) -> Config:
 
 if __name__ == "__main__":
     # Run `python config.py` to print the presets and their estimated sizes.
-    for name in ("tiny", "full", "base2", "distill"):
+    for name in ("tiny", "full", "base2", "distill", "sft"):
         c = get_config(name)
         n = c.num_params_estimate()
         print(f"[{name:5s}] ~{n/1e6:8.2f}M params | "

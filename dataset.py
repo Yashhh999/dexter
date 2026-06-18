@@ -113,6 +113,64 @@ def _jsonl_iter(path: str) -> Iterator[dict]:
             return
 
 
+# =========================================================================================
+# Instruction formatting (SFT): turn {instruction, output} style examples into ONE templated
+# text string, so the existing tokenize -> .bin -> random-window pipeline trains an instruction
+# follower with NO special batch path.  Each example becomes one "document" (prepare_data
+# appends <|endoftext|> after it), so the model also learns to STOP after the response.
+# =========================================================================================
+SFT_TEMPLATE       = "### Instruction:\n{instr}\n\n### Response:\n{resp}"
+SFT_TEMPLATE_INPUT = "### Instruction:\n{instr}\n\n### Input:\n{inp}\n\n### Response:\n{resp}"
+
+
+def _format_example(ex: dict, entry: dict) -> Optional[str]:
+    """Render one instruction example to templated text, or None to skip it.  Supports three
+    common dataset shapes via entry["format"]:
+      "alpaca"   -> instruction (+ optional input) + output
+      "qa"       -> a single prompt field + response field (e.g. gsm8k question/answer)
+      "sharegpt" -> a "conversations" list of {from/role, value/content} turns (first pair)
+    """
+    fmt = entry["format"]
+    if fmt == "alpaca":
+        instr = (ex.get(entry.get("instr_field", "instruction")) or "").strip()
+        inp   = (ex.get(entry.get("input_field", "input")) or "").strip()
+        resp  = (ex.get(entry.get("output_field", "output")) or "").strip()
+        if not instr or not resp:
+            return None
+        return (SFT_TEMPLATE_INPUT.format(instr=instr, inp=inp, resp=resp) if inp
+                else SFT_TEMPLATE.format(instr=instr, resp=resp))
+    if fmt == "qa":
+        instr = (ex.get(entry.get("prompt_field", "question")) or "").strip()
+        resp  = (ex.get(entry.get("response_field", "answer")) or "").strip()
+        if not instr or not resp:
+            return None
+        return SFT_TEMPLATE.format(instr=instr, resp=resp)
+    if fmt == "sharegpt":
+        conv = ex.get(entry.get("conv_field", "conversations")) or []
+        instr = resp = None
+        for turn in conv:
+            role = turn.get("from") or turn.get("role")
+            val  = (turn.get("value") or turn.get("content") or "").strip()
+            if role in ("human", "user") and instr is None:
+                instr = val
+            elif role in ("gpt", "assistant") and instr is not None and resp is None:
+                resp = val
+                break
+        if not instr or not resp:
+            return None
+        return SFT_TEMPLATE.format(instr=instr, resp=resp)
+    raise ValueError(f"unknown instruction format {fmt!r} (use alpaca / qa / sharegpt)")
+
+
+def _instruction_iter(raw_iter: Iterator[dict], entry: dict) -> Iterator[dict]:
+    """Wrap a raw HF example iterator, yielding {"text": <templated instruction>} dicts so the
+    weighted-interleave / tokenize path can treat instruction data exactly like plain text."""
+    for ex in raw_iter:
+        text = _format_example(ex, entry)
+        if text:
+            yield {"text": text}
+
+
 def _mixed_text_iter(cfg: Config) -> Iterator[str]:
     """
     Build iterators for every source in cfg.dataset_mix and interleave them by weight.
@@ -127,7 +185,10 @@ def _mixed_text_iter(cfg: Config) -> Iterator[str]:
             from datasets import load_dataset
             ds = load_dataset(entry["id"], entry.get("name"),
                               split=entry.get("split", "train"), streaming=True)
-            sources.append((iter(ds), entry.get("text_field", "text")))
+            if entry.get("format"):                   # instruction data -> template into text
+                sources.append((_instruction_iter(iter(ds), entry), "text"))
+            else:
+                sources.append((iter(ds), entry.get("text_field", "text")))
         weights.append(float(entry.get("weight", 1.0)))
     names = ", ".join(f'{e.get("id") or e.get("path")}={e.get("weight", 1)}'
                       for e in cfg.dataset_mix)

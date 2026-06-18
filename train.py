@@ -325,7 +325,8 @@ def estimate_val_loss(model, cfg, device, device_batch, autocast_ctx):
 # =========================================================================================
 def main():
     parser = argparse.ArgumentParser(description="Train the from-scratch GPT.")
-    parser.add_argument("--preset", default="tiny", choices=["tiny", "full", "base2", "distill"])
+    parser.add_argument("--preset", default="tiny",
+                        choices=["tiny", "full", "base2", "distill", "sft"])
     parser.add_argument("--max_steps", type=int, default=None, help="override cfg.max_steps")
     parser.add_argument("--batch_size", type=int, default=None, help="override per-GPU micro-batch")
     parser.add_argument("--log_interval", type=int, default=None,
@@ -351,6 +352,11 @@ def main():
                         help="optimize for Kaggle 2x T4 via DDP "
                              "(launch with: torchrun --nproc_per_node=2 train.py ... --kaggle)")
     parser.add_argument("--device", default=None, help="cuda | cpu (auto if unset)")
+    parser.add_argument("--init_from", default=None,
+                        help="load WEIGHTS ONLY from this checkpoint, then start a FRESH "
+                             "optimizer + LR schedule at step 0. Use to fine-tune / continue-"
+                             "train a finished base, e.g. SFT:\n"
+                             "  --preset sft --init_from base_v03/ckpt_011100.pt")
     args = parser.parse_args()
     if args.kaggle and (args.colab or args.single):
         raise SystemExit("Pick one of --single/--colab (1 GPU) OR --kaggle (2x T4 DDP), not both.")
@@ -375,6 +381,20 @@ def main():
         overrides["offline"] = True
     cfg = get_config(args.preset, **overrides)
     apply_platform(cfg, args)   # --colab / --kaggle tuning (after preset + CLI overrides)
+
+    # --init_from continues a TRAINED model, which REQUIRES the matching tokenizer -- a freshly
+    # trained one would scramble the loaded embeddings.  Fail loudly rather than silently train
+    # garbage on a mismatched vocabulary.
+    if args.init_from:
+        if not os.path.exists(args.init_from):
+            raise SystemExit(f"--init_from checkpoint not found: {args.init_from}")
+        if not os.path.exists(cfg.tokenizer_path):
+            raise SystemExit(
+                f"--init_from needs the base model's tokenizer at '{cfg.tokenizer_path}', but "
+                f"it's missing. Pull it first, e.g.:\n"
+                f"  huggingface-cli download {cfg.hf_repo or 'Yashhh999/dexter'} "
+                f"v03/data/{cfg.tokenizer_path} --local-dir .\n"
+                f"  mv v03/data/{cfg.tokenizer_path} {cfg.tokenizer_path}")
 
     # ---- distributed (DDP) + device setup -------------------------------------------------
     is_ddp, rank, world_size, local_rank, ddp_device, master = setup_distributed()
@@ -473,6 +493,16 @@ def main():
         start_step = ckpt["step"] + 1
         if master:
             print(f"[resume] continuing from step {start_step} ({ckpt_path})")
+    elif args.init_from:
+        # Weights-only init: load the base model's parameters, but keep the FRESH optimizer,
+        # scaler, and step=0 -> a brand-new LR schedule over the new (fine-tuning) data.  An
+        # existing checkpoint in cfg.ckpt_dir takes priority above, so a crashed SFT run still
+        # resumes itself rather than restarting from the base.
+        ckpt = torch.load(args.init_from, map_location=device)
+        raw_model.load_state_dict(ckpt["model"])
+        if master:
+            print(f"[init ] initialized weights from {args.init_from} "
+                  f"(fresh optimizer + LR schedule; starting at step 0).")
     elif master:
         print("[resume] no checkpoint found; starting from scratch.")
 

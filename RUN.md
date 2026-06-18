@@ -22,6 +22,10 @@ python train.py --preset base2 --colab
 
 # L40S / Lightning / any single GPU:
 python train.py --preset base2 --single --batch_size 64 --grad_accum 4
+
+#t4 single
+python train.py --preset base2 --single --batch_size 8 --grad_accum 32
+
 ```
 
 Rule: **2 GPUs → `torchrun … --kaggle`** · **1 GPU → `python … --single`**.
@@ -34,3 +38,17 @@ python sample.py --preset base2 --prompt "The water cycle is" --max_new_tokens 1
 ```
 
 Auto-pulls the tokenizer + latest checkpoint from HF. It's a **base model** → prompt it with the *start of a sentence*, not "hello" (chat needs v0.4 SFT). Options: `--num_samples 3 --temperature 0.8 --top_p 0.95`.
+
+python sample.py --preset base2 --ckpt checkpoints_v03/ckpt_011100.pt --prompt "The water cycle is" --max_new_tokens 120
+
+
+# pick an older step
+python sample.py --preset base2 --ckpt checkpoints_v03/ckpt_003000.pt --prompt "Photosynthesis is"
+
+# a few samples + tweak decoding
+python sample.py --preset base2 --ckpt checkpoints_v03/ckpt_003600.pt --prompt "Once upon a time" \
+  --num_samples 3 --temperature 0.8 --top_p 0.95
+
+# no --ckpt = automatically uses the latest checkpoint (local, or pulled from HF)
+python sample.py --preset base2 --prompt "The water cycle is"
+
