@@ -422,10 +422,13 @@ def get_config(preset: str = "tiny", **overrides) -> Config:
 
             # REUSE base2's tokenizer -- do NOT retrain (the loaded weights depend on it).
             tokenizer_path="tokenizer_v03.json",
-            data_dir="data_sft",
-            ckpt_dir="checkpoints_sft",
+            # Own clean lineage (separate from the old "sft" v0.4 run) so HF AUTO-RESUME is
+            # unambiguous: train.py pulls the newest checkpoint from this subfolder and continues.
+            # Without a fresh folder, the old v0.4 ckpt_002000 (higher step) would be grabbed first.
+            data_dir="data_sftchat",
+            ckpt_dir="checkpoints_sftchat",
 
-            hf_repo="Yashhh999/dexter", hf_subfolder="sft",
+            hf_repo="Yashhh999/dexter", hf_subfolder="sftchat",
             hf_push_interval=400, hf_keep=8,
         )
 
