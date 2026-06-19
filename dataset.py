@@ -179,8 +179,12 @@ def _mixed_text_iter(cfg: Config) -> Iterator[str]:
     """
     sources, weights = [], []
     for entry in cfg.dataset_mix:
-        if entry.get("path"):                         # local distilled corpus
-            sources.append((_jsonl_iter(entry["path"]), entry.get("text_field", "text")))
+        if entry.get("path"):                         # local jsonl (distilled corpus / identity)
+            raw = _jsonl_iter(entry["path"])
+            if entry.get("format"):                   # instruction-formatted -> template it
+                sources.append((_instruction_iter(raw, entry), "text"))
+            else:
+                sources.append((raw, entry.get("text_field", "text")))
         else:                                         # streamed HuggingFace dataset
             from datasets import load_dataset
             ds = load_dataset(entry["id"], entry.get("name"),

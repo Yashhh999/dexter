@@ -153,6 +153,11 @@ class Config:
     ckpt_dir: str = "checkpoints"   # where training checkpoints are written.
     tokenizer_path: str = "tokenizer.json"  # where the trained BPE tokenizer is saved.
 
+    require_tokenizer: bool = False  # if True, REUSE the tokenizer at tokenizer_path and FAIL
+                                     #   loudly if it's missing -- never silently train a new one
+                                     #   (a fresh tokenizer scrambles a loaded model's embeddings,
+                                     #   which is exactly what silently broke an SFT run once).
+
     # Caps so local runs finish quickly.  None = "use the entire corpus" (the Kaggle setting).
     max_train_tokens: Optional[int] = 2_000_000   # stop writing train.bin after this many tokens.
     max_val_tokens: Optional[int] = 100_000       # stop writing val.bin after this many tokens.
@@ -408,27 +413,32 @@ def get_config(preset: str = "tiny", **overrides) -> Config:
 
             # ---- instruction data MIX (dataset.py templates each into ### Instruction/Response)
             dataset_mix=[
-                {"id": "teknium/OpenHermes-2.5", "format": "sharegpt", "weight": 0.4},
+                # Dexter persona/identity (small LOCAL set; the jsonl loops, so a modest weight
+                # still gets it seen often enough to stick). No "I'm an AI" lines on purpose.
+                {"path": "identity.jsonl", "format": "alpaca", "weight": 0.08},
+                {"id": "teknium/OpenHermes-2.5", "format": "sharegpt", "weight": 0.37},
                 {"id": "yahma/alpaca-cleaned", "format": "alpaca", "weight": 0.25},
                 # natural assistant conversation -> teaches greetings / casual "hi" / chat turns
                 # (UltraChat uses a "messages" list of {role, content}; our sharegpt formatter
                 # handles role/content as well as from/value).
                 {"id": "HuggingFaceH4/ultrachat_200k", "split": "train_sft",
-                 "format": "sharegpt", "conv_field": "messages", "weight": 0.2},
+                 "format": "sharegpt", "conv_field": "messages", "weight": 0.15},
                 {"id": "openai/gsm8k", "name": "main", "format": "qa",
                  "prompt_field": "question", "response_field": "answer", "weight": 0.15},
             ],
             max_train_tokens=60_000_000, max_val_tokens=1_000_000,
 
             # REUSE base2's tokenizer -- do NOT retrain (the loaded weights depend on it).
+            # require_tokenizer => a missing tokenizer FAILS loudly instead of silently training a
+            # wrong one (the bug that scrambled the earlier SFT runs).
             tokenizer_path="tokenizer_v03.json",
-            # Own clean lineage (separate from the old "sft" v0.4 run) so HF AUTO-RESUME is
-            # unambiguous: train.py pulls the newest checkpoint from this subfolder and continues.
-            # Without a fresh folder, the old v0.4 ckpt_002000 (higher step) would be grabbed first.
-            data_dir="data_sftchat",
-            ckpt_dir="checkpoints_sftchat",
+            require_tokenizer=True,
+            # Fresh "dexter" lineage so this run tokenizes cleanly and never pulls the corrupted
+            # data/checkpoints left behind by the broken sft/sftchat runs.
+            data_dir="data_dexter",
+            ckpt_dir="checkpoints_dexter",
 
-            hf_repo="Yashhh999/dexter", hf_subfolder="sftchat",
+            hf_repo="Yashhh999/dexter", hf_subfolder="dexter",
             hf_push_interval=400, hf_keep=8,
         )
 

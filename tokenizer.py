@@ -54,6 +54,18 @@ def train_tokenizer(cfg: Config) -> "Tokenizer":
         print(f"[tokenizer] found existing '{cfg.tokenizer_path}', loading (no retrain).")
         return Tokenizer(cfg.tokenizer_path)
 
+    # Presets that REUSE a fixed tokenizer (e.g. sft, which loads a base trained with it) must
+    # never silently train a NEW one -- different merges => the loaded model's token ids no longer
+    # match its embeddings => fluent-looking garbage. Fail loudly with how to fetch the right file.
+    if getattr(cfg, "require_tokenizer", False):
+        raise SystemExit(
+            f"[tokenizer] '{cfg.tokenizer_path}' is REQUIRED but missing. This preset reuses an "
+            f"existing tokenizer; training a new one would scramble the model's embeddings. "
+            f"Download the real one first:\n"
+            f"  hf download {cfg.hf_repo or 'Yashhh999/dexter'} v03/data/{cfg.tokenizer_path} "
+            f"--local-dir _tok\n"
+            f"  cp _tok/v03/data/{cfg.tokenizer_path} {cfg.tokenizer_path}")
+
     _src = "the dataset mix" if getattr(cfg, "dataset_mix", None) else cfg.dataset_name
     print(f"[tokenizer] training a {cfg.vocab_size}-token byte-level BPE on {_src} ...")
 
